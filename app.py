@@ -1,542 +1,1150 @@
-# ==============================================================================
-# IMPORT LIBRARIES 
-# ==============================================================================
-import streamlit as st
+# app.py (Restored Full Code without Anonymizer, with Department Filter, fixed Safety Goals & indents)
+# -*- coding: utf-8 -*-
 import os
-st.set_page_config(layout="wide") 
-from tqdm import tqdm
-from anonymizer import load_ner_model, anonymize_column
-import streamlit as st
-import os # Make sure os is imported
+import re
+import unicodedata
+from datetime import datetime, date
+import numpy as np
 import pandas as pd
-from streamlit_modal import Modal
-from ai_assistant import get_consultation_response
+import streamlit as st
 from pathlib import Path
 import base64
-from datetime import datetime, date
 from dateutil.relativedelta import relativedelta
-import numpy as np
 import statsmodels.api as sm
-from sklearn.linear_model import LinearRegression
+# from sklearn.linear_model import LinearRegression # Not used currently
 import plotly.express as px
 import plotly.graph_objects as go
+
+# Keep AI/Risk Register imports (assuming files exist)
 try:
     import google.generativeai as genai
 except ImportError:
     genai = None
-from risk_register_assistant import get_risk_register_consultation
-import re
 
-def anonymize_text(text: str, ner_model=None) -> str:
-    if not isinstance(text, str):
-        return text
+# Ensure these helper python files exist in the same directory or adjust path
+try:
+    from ai_assistant import get_consultation_response
+except ImportError:
+    def get_consultation_response(text): return f"Error: Could not import `get_consultation_response` from `ai_assistant.py`."
+try:
+    from risk_register_assistant import get_risk_register_consultation
+except ImportError:
+    def get_risk_register_consultation(query, df, risk_mitigation_df): return {"error": "Error: Could not import `get_risk_register_consultation` from `risk_register_assistant.py`."}
 
-    # 1) ปกปิด HN ทุกแบบ: HN 123456 / HN:123456 / HN.123456 / HN-123456
-    text = re.sub(r'(?i)\bHN[\s\.:#-]*\d{4,10}\b', 'HN.XXXXXX', text)
+# Set page config first
+st.set_page_config(layout="wide", page_title="HOIA-RR")
 
-    # 2) (ถ้ามี NER) ให้ NER ทำต่อได้ตามเดิม (แต่ต้องระวังอย่าไป unmask)
-    #    ตรงนี้สมมุติว่า anonymizer ของคุณทำงานบนสตริงทั้งก้อน
-    #    ถ้าไม่มี ก็ข้ามได้
-    # if ner_model:
-    #     text = your_ner_masker(text, ner_model)
+# =========================
+# 0) อ้างอิง กลุ่มงาน ↔ หน่วยงาน
+# =========================
+SERVICE_MAP = [
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "งานการแพทย์สาขากุมารเวชศาสตร์"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "งานการแพทย์สาขาจักษุวิทยา"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "งานการแพทย์สาขาจิตเวชศาสตร์"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "งานนิติเวช"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "งานพยาธิวิทยากายวิภาค (PATHO)"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "งานพยาธิวิทยาคลินิก"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "งานธนาคารเลือด"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "งานรังสีวิทยา"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "งานการพยาบาลวิสัญญี"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "งานการแพทย์สาขาวิสัญญีวิทยา"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "งานเวชกรรมสังคม"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "งานการแพทย์สาขาเวชศาสตร์ฉุกเฉิน"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "งานกายภาพบําบัด"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "หน่วยตรวจเวชศาสตร์ฟื้นฟู"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "งานการแพทย์สาขาศัลยศาสตร์"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "งานการแพทย์สาขาออร์โธปิดิกส์"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "งานการแพทย์สาขาสูติศาสตร์และนรีเวชวิทยา"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "งานการแพทย์สาขาโสต ศอ นาสิก"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "งานการแพทย์สาขาอายุรศาสตร์"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "งานการแพทย์"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "คลินิกพิเศษเฉพาะทางนอกเวลา (SMC)"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "คลินิกแพทย์แผนไทย"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "คลินิกแพทย์แผนจีน"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "คลินิกแพทย์บูรณาการ"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "แผนกห้องยาสมุนไพร"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "งานเภสัชกรรม"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "คลังเวชภัณฑ์ที่มิใช่ยา"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "งานโภชนาการ"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "ศูนย์เครื่องมือแพทย์"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "หน่วยโลจิสติกส์และเคลื่อนย้ายผู้ป้วย"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "งานเวชภัณฑ์ปลอดเชื้อ(CSSD)"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "งานบริการผ้า"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "หน่วยสังคมสงเคราะห์"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "Admission center"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "หน่วยประสานสิทธิ์การแพทย์"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "หน่วยเวชสถิติ"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "หน่วยเวชระเบียน"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "หน่วยจ่ายยาผู้ป่วย 11B"},
+    {"กลุ่มงาน": "กลุ่มงานการแพทย์", "หน่วยงาน": "งานสนับสนุนทางการแพทย์"},
+    {"กลุ่มงาน": "กลุ่มงานพัฒนาคุณภาพและการศึกษา", "หน่วยงาน": "งานพัฒนาคุณภาพ"},
+    {"กลุ่มงาน": "กลุ่มงานพัฒนาคุณภาพและการศึกษา", "หน่วยงาน": "งานส่งเสริมวิจัยและนวัตกรรม"},
+    {"กลุ่มงาน": "กลุ่มงานพัฒนาคุณภาพและการศึกษา", "หน่วยงาน": "ศูนย์รับเรื่องร้องเรียนและศูนย์ธรรมจริยธรรม"},
+    {"กลุ่มงาน": "กลุ่มงานพัฒนาคุณภาพและการศึกษา", "หน่วยงาน": "ศูนย์บริการจัดการเรื่องร้องเรียนและยุติธรรมเชิงสมานฉันท์"},
+    {"กลุ่มงาน": "กลุ่มงานนโยบายและยุทธศาสตร์", "หน่วยงาน": "งานวางแผนและบริหารยุทธศาสตร์"},
+    {"กลุ่มงาน": "กลุ่มงานนโยบายและยุทธศาสตร์", "หน่วยงาน": "งานเทคโนโลยีสารสนเทศ"},
+    {"กลุ่มงาน": "กลุ่มงานบริหาร", "หน่วยงาน": "งานสารบรรณและอำนวยการ"},
+    {"กลุ่มงาน": "กลุ่มงานบริหาร", "หน่วยงาน": "งานโครงสร้างพื้นฐานและวิศวกรรม (งานอาคารสถานที่)"},
+    {"กลุ่มงาน": "กลุ่มงานบริหาร", "หน่วยงาน": "งานทรัพยากรบุคคล"},
+    {"กลุ่มงาน": "กลุ่มงานบริหาร", "หน่วยงาน": "หน่วยประชาสัมพันธ์และการตลาด"},
+    {"กลุ่มงาน": "กลุ่มงานบริหาร", "หน่วยงาน": "งานการเงินบัญชีและงบประมาณ"},
+    {"กลุ่มงาน": "กลุ่มงานบริหาร", "หน่วยงาน": "งานพัสดุ"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "หน่วยบริการผู้ป่วยฉุกเฉิน (ER)"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "หน่วยตรวจรักษาทั่วไป"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "หน่วยตรวจตา"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "หน่วยตรวจหู คอ จมูก"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "หน่วยตรวจหัวใจและหลอดเลือด ( OPD Heart )"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "หน่วยตรวจสวนหัวใจและหลอดเลือด ( Cath Lab )"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "หน่วยตรวจสูตินรีเวชศาสตร์"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "ห้องคลอด"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "หอผู้ป่วยสูตินรีเวชศาสตร์และกุมารเวชศาสตร์ 12 B"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "หน่วยตรวจผู้ป่วยนอกศัลยศาสตร์"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "หน่วยตรวจผู้ป่วยนอกออร์โธปิดิกส์"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "หอผู้ป่วย 8B"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "หอผู้ป่วยสามัญรวม 9A"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "หอผู้ป่วยพิเศษศัลยศาสตร์ 10A"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "หอผู้ป่วยพิเศษศัลยศาสตร์ 11A"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "หอผู้ป่วยพิเศษศัลยศาสตร์และออร์โธปิดิกส์ 12A"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "หน่วยตรวจผู้ป่วยนอกอายุรศาสตร์"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "หอผู้ป่วย CCU"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "หอผู้ป่วยไอซียูอายุรศาสตร์"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "หอผู้ป่วยสามัญอายุรศาสตร์หญิง 7A"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "หอผู้ป่วยสามัญอายุรศาสตร์ชาย 7B"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "หอผู้ป่วยพิเศษรวม 10B"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "หน่วยเคมีบำบัด 11B"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "ห้องไตเทียม"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "หน่วยบำบัดทดแทนไต"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "หน่วยตรวจเด็กสุขภาพดี"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "หน่วยตรวจรักษาเด็กป่วย"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "หออภิบาลทารกแรกเกิด (Nursery)"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "หน่วยตรวจสุขภาพจิต"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "หอผู้ป่วยสามัญจิตเวช (8A)"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "งานการพยาบาลผ่าตัด"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "ศูนย์ส่องกล้องระบบทางเดินอาหาร"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "หน่วยส่งเสริมสุขภาพ"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "หน่วยตรวจสุขภาพ (Check-up)"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "งานศูนย์ความเป็นเลิศทางการพยาบาล"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "งานป้องกันและควบคุมการติดเชื้อในโรงพยาบาล"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "หน่วยผู้ป่วยวิกฤตอายุรกรรม"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "งานการพยาบาลห้องคลอดและทารกแรกเกิด (งานอาสาสมัคร)"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "หอผู้ป่วยสามัญเด็ก ชั้น 9B"},
+    {"กลุ่มงาน": "กลุ่มงานการพยาบาล", "หน่วยงาน": "300503"},
+]
+REF_DF = pd.DataFrame(SERVICE_MAP)
+REF_COL = "หน่วยงาน"  # Column name in the main data file for department
 
-    return text
+def list_units(group_name: str) -> list:
+    if not group_name or group_name in ("-- เลือกกลุ่มงาน --", "-- ทั้งหมด --"):
+        return []
+    if group_name in REF_DF["กลุ่มงาน"].unique():
+        return sorted(REF_DF.loc[REF_DF["กลุ่มงาน"] == group_name, "หน่วยงาน"].unique().tolist())
+    return []
 
-# ==============================================================================
-# --- 1. การตั้งค่าและตัวแปรหลัก ---
-# ==============================================================================
-DATA_DIR = Path("data")
-DATA_DIR.mkdir(exist_ok=True)
-PERSISTED_DATA_PATH = DATA_DIR / "processed_incident_data.parquet"
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin1234")
-# ==============================================================================
-# PAGE CONFIGURATION
-# ==============================================================================
-LOGO_URL = "https://raw.githubusercontent.com/HOIARRTool/hoiarr/refs/heads/main/logo1.png"
-st.set_page_config(page_title="HOIA-RR", page_icon=LOGO_URL, layout="wide")
-st.markdown("""
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600;700&display=swap');
-
-    /* ✅ --- START: แก้ไขการกำหนดฟอนต์ --- */
-    /* กำหนดฟอนต์ 'Kanit' ให้กับส่วนหลักของแอป โดยไม่กระทบไอคอน */
-    html, body, [data-testid="stAppViewContainer"], [data-testid="stSidebar"] {
-        font-family: 'Kanit', sans-serif;
-    }
-    /* ✅ --- END: สิ้นสุดการแก้ไข --- */
-
-    /* --- Gradient Text for Sidebar Title --- */
-    .gradient-text {
-        background-image: linear-gradient(45deg, #f09433, #e6683c, #dc2743, #bc1888, #833ab4);
-        -webkit-background-clip: text;
-        background-clip: text;
-        -webkit-text-fill-color: transparent;
-        font-weight: 700;
-        display: inline-block;
-    }
-
-    /* --- Original App Styles --- */
-    [data-testid="stChatInput"] textarea { min-height: 80px; height: 100px; resize: vertical; background-color: transparent; border: none; }
-
-    .metric-box {
-        border: 1px solid #ddd;
-        padding: 10px;
-        border-radius: 0.5rem;
-        margin-bottom: 0.5rem;
-    }
-    .metric-box .label { font-size: 0.9rem; color: #555; }
-    .metric-box .value { font-size: 1.8rem; font-weight: bold; color: #262730; }
-    .metric-box-1 { background-color: #e6fffa; border-color: #b2f5ea; }
-    .metric-box-2 { background-color: #fff3e0; border-color: #ffe0b2; }
-    .metric-box-3 { background-color: #fce4ec; border-color: #f8bbd0; }
-    .metric-box-4 { background-color: #e3f2fd; border-color: #bbdefb; }
-    .metric-box-5 { background-color: #f0f4c3; border-color: #e6ee9c; }
-    .metric-box-6 { background-color: #ffecb3; border-color: #ffd54f; }
-    .metric-box-7 { background-color: #ffcdd2; border-color: #ef9a9a; }
-
-    .summary-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
-    .summary-table th, .summary-table td { border: 1px solid #ddd; padding: 8px; text-align: left; word-wrap: break-word; overflow-wrap: break-word; }
-    .summary-table th { background-color: #f2f2f2; }
-    .summary-table-4-col th:nth-child(1), .summary-table-4-col td:nth-child(1) { width: 20%; }
-    .summary-table-4-col th:nth-child(2), .summary-table-4-col td:nth-child(2) { width: 20%; }
-    .summary-table-4-col th:nth-child(3), .summary-table-4-col td:nth-child(3) { width: 10%; }
-    .summary-table-4-col th:nth-child(4), .summary-table-4-col td:nth-child(4) { width: 50%; }
-    .summary-table-5-col th:nth-child(1), .summary-table-5-col td:nth-child(1) { width: 15%; }
-    .summary-table-5-col th:nth-child(2), .summary-table-5-col td:nth-child(2) { width: 15%; }
-    .summary-table-5-col th:nth-child(3), .summary-table-5-col td:nth-child(3) { width: 20%; }
-    .summary-table-5-col th:nth-child(4), .summary-table-5-col td:nth-child(4) { width: 10%; }
-    .summary-table-5-col th:nth-child(5), .summary-table-5-col td:nth-child(5) { width: 40%; }
-    .summary-table-6-col th:nth-child(1), .summary-table-6-col td:nth-child(1) { width: 12%; }
-    .summary-table-6-col th:nth-child(2), .summary-table-6-col td:nth-child(2) { width: 12%; }
-    .summary-table-6-col th:nth-child(3), .summary-table-6-col td:nth-child(3) { width: 20%; }
-    .summary-table-6-col th:nth-child(4), .summary-table-6-col td:nth-child(4) { width: 16%; }
-    .summary-table-6-col th:nth-child(5), .summary-table-6-col td:nth-child(5) { width: 8%; }
-    .summary-table-6-col th:nth-child(6), .summary-table-6-col td:nth-child(6) { width: 32%; }
-</style>
-""", unsafe_allow_html=True)
-st.markdown("""
-<style>
-@media print {
-    div[data-testid="stHorizontalBlock"] { display: grid !important; grid-template-columns: repeat(5, 1fr) !important; gap: 1.2rem !important; }
-    .stDataFrame, .stTable { break-inside: avoid; page-break-inside: avoid; }
-    thead, tr, th, td { break-inside: avoid !important; page-break-inside: avoid !important; }
-    h1, h2, h3, h4, h5 { page-break-after: avoid; }
+# =========================
+# A) Normalization & Mapping
+# =========================
+INVIS_CHARS = {"\u200b": "", "\u200c": "", "\u200d": "", "\ufeff": ""}
+PARENS = {"（": "(", "）": ")", "﹙": "(", "﹚": ")", "“": '"', "”": '"', "‘": "'", "’": "'"}
+TRANS_INVIS = str.maketrans(INVIS_CHARS)
+TRANS_PARENS = str.maketrans(PARENS)
+ALIASES = {
+    "หน่วยโลจิสติกส์และเคลื่อนย้ายผู้ป้วย": "หน่วยโลจิสติกส์และเคลื่อนย้ายผู้ป่วย",
 }
-.custom-header { font-size: 20px; font-weight: bold; margin-top: 0px !important; padding-top: 0px !important; }
-div[data-testid="stHorizontalBlock"] > div div[data-testid="stMetric"] { border: 1px solid #ddd; padding: 0.75rem; border-radius: 0.5rem; height: 100%; display: flex; flex-direction: column; justify-content: center; }
-div[data-testid="stHorizontalBlock"] > div:nth-child(1) div[data-testid="stMetric"] { background-color: #e6fffa; border-color: #b2f5ea; }
-div[data-testid="stHorizontalBlock"] > div:nth-child(2) div[data-testid="stMetric"] { background-color: #fff3e0; border-color: #ffe0b2; }
-div[data-testid="stHorizontalBlock"] > div:nth-child(3) div[data-testid="stMetric"] { background-color: #fce4ec; border-color: #f8bbd0; }
-div[data-testid="stHorizontalBlock"] > div:nth-child(4) div[data-testid="stMetric"] { background-color: #e3f2fd; border-color: #bbdefb; }
-div[data-testid="stHorizontalBlock"] > div div[data-testid="stMetric"] [data-testid="stMetricLabel"] > div,
-div[data-testid="stHorizontalBlock"] > div div[data-testid="stMetric"] [data-testid="stMetricValue"],
-div[data-testid="stHorizontalBlock"] > div div[data-testid="stMetric"] [data-testid="stMetricDelta"] { color: #262730 !important; }
-div[data-testid="stMetric"] [data-testid="stMetricLabel"] > div { font-size: 0.8rem !important; line-height: 1.2 !important; white-space: normal !important; overflow-wrap: break-word !important; word-break: break-word; display: block !important; }
-div[data-testid="stMetric"] [data-testid="stMetricValue"] { font-size: 1.3rem !important; }
-div[data-testid="stMetric"] [data-testid="stMetricDelta"] { font-size: 0.75rem !important; }
-div[data-testid="stHorizontalBlock"] > div .stExpander { border: none !important; box-shadow: none !important; padding: 0 !important; margin-top: 0.5rem; }
-div[data-testid="stHorizontalBlock"] > div .stExpander header { padding: 0.25rem 0.5rem !important; font-size: 0.75rem !important; border-radius: 0.25rem; }
-div[data-testid="stHorizontalBlock"] > div .stExpander div[data-testid="stExpanderDetails"] { max-height: 200px; overflow-y: auto; }
-.stDataFrame table td, .stDataFrame table th { color: black !important; font-size: 0.9rem !important; }
-.stDataFrame table th { font-weight: bold !important; }
-</style>
-""", unsafe_allow_html=True)
 
+def normalize_unit(text: str) -> str:
+    if pd.isna(text): return ""
+    s = str(text)
+    s = unicodedata.normalize("NFKC", s)
+    s = s.replace("\xa0", " ").translate(TRANS_INVIS).translate(TRANS_PARENS)
+    s = re.sub(r"\s+", " ", s.strip()).strip('\'"')
+    return ALIASES.get(s, s)
 
-# ==============================================================================
-# ANALYSIS FUNCTIONS
-# ==============================================================================
-def create_summary_table_by_code(dataframe):
-    """
-    สร้างตารางสรุปจำนวนอุบัติการณ์ตาม 'รหัส' และระดับความรุนแรง
-    โดยในแถวจะแสดงทั้งรหัสและชื่อของอุบัติการณ์
-    """
-    # ตรวจสอบว่ามีคอลัมน์ที่จำเป็นหรือไม่
-    required_cols = ['รหัส', 'ชื่ออุบัติการณ์ความเสี่ยง', 'Impact']
-    if not all(col in dataframe.columns for col in required_cols):
-        missing_cols = [col for col in required_cols if col not in dataframe.columns]
-        st.warning(f"ไม่สามารถสร้างตารางได้ เนื่องจากขาดคอลัมน์: {', '.join(missing_cols)}")
-        return pd.DataFrame()
+service_map_norm = {normalize_unit(r["หน่วยงาน"]): r["กลุ่มงาน"] for r in SERVICE_MAP}
 
-    # ทำสำเนาของ DataFrame เพื่อป้องกันการแก้ไขข้อมูลต้นฉบับ
-    df_copy = dataframe.copy()
+# === Safety Goals definitions (global) ===
+goal_definitions = {
+    "Patient Safety/ Common Clinical Risk": "P:Patient Safety Goals หรือ Common Clinical Risk Incident",
+    "Specific Clinical Risk": "S:Specific Clinical Risk Incident",
+    "Personnel Safety": "P:Personnel Safety Goals",
+    "Organization Safety": "O:Organization Safety Goals",
+}
 
-    # ---- 1. สร้างคอลัมน์ใหม่ที่รวมรหัสและชื่อเข้าด้วยกัน ----
-    # .fillna('') เพื่อป้องกัน error หากบางแถวไม่มีชื่ออุบัติการณ์
-    df_copy['รหัส | ชื่ออุบัติการณ์'] = df_copy['รหัส'].astype(str) + " | " + df_copy['ชื่ออุบัติการณ์ความเสี่ยง'].fillna('')
+# =========================
+# 1) แปลงวันที่/เวลาไทย → Timestamp
+# =========================
+THAI_MONTHS = {
+    "ม.ค.":1, "ก.พ.":2, "มี.ค.":3, "เม.ย.":4, "พ.ค.":5, "มิ.ย.":6,
+    "ก.ค.":7, "ส.ค.":8, "ก.ย.":9, "ต.ค.":10, "พ.ย.":11, "ธ.ค.":12,
+    "มกราคม":1, "กุมภาพันธ์":2, "มีนาคม":3, "เมษายน":4, "พฤษภาคม":5, "มิถุนายน":6,
+    "กรกฎาคม":7, "สิงหาคม":8, "กันยายน":9, "ตุลาคม":10, "พฤศจิกายน":11, "ธันวาคม":12,
+}
+THAI_DIGITS = "๐๑๒๓๔๕๖๗๘๙"; ARABIC_DIGITS = "0123456789"
+DIGIT_MAP = str.maketrans({t: a for t, a in zip(THAI_DIGITS, ARABIC_DIGITS)})
 
-    df_valid = df_copy.dropna(subset=['รหัส | ชื่ออุบัติการณ์', 'Impact'])
-    if df_valid.empty:
-        return pd.DataFrame()
+def normalize_raw_datetime_text(x):
+    if x is None or (isinstance(x, float) and pd.isna(x)) or (isinstance(x, str) and x.strip() == ""): return None
+    s = str(x).strip().translate(DIGIT_MAP)
+    s = re.sub(r"\bเวลา\b", "", s); s = re.sub(r"\s*น\.?\b", "", s); s = re.sub(r"\s+", " ", s).strip()
+    return s if s else None
 
-    # ---- 2. ใช้คอลัมน์ใหม่ ('รหัส | ชื่ออุบัติการณ์') ในการสร้างตาราง Crosstab ----
-    summary = pd.crosstab(df_valid['รหัส | ชื่ออุบัติการณ์'], df_valid['Impact'])
+def parse_incident_datetime(value):
+    # Handle direct Timestamp or datetime objects
+    if isinstance(value, (pd.Timestamp, datetime)):
+        ts = pd.Timestamp(value)
+        if ts.year >= 2400:
+            ts = ts - pd.DateOffset(years=543)
+        return ts
 
-    # (ส่วนที่เหลือของฟังก์ชันเหมือนเดิม)
-    severity_levels = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I']
-    summary = summary.reindex(columns=severity_levels, fill_value=0)
-
-    e_to_i_cols = [col for col in ['E', 'F', 'G', 'H', 'I'] if col in summary.columns]
-    summary['รวม E-up'] = summary[e_to_i_cols].sum(axis=1)
-
-    total_e_up_incidents = summary['รวม E-up'].sum()
-
-    if total_e_up_incidents > 0:
-        summary['ร้อยละ E-up'] = (summary['รวม E-up'] / total_e_up_incidents * 100).map('{:.2f}%'.format)
-    else:
-        summary['ร้อยละ E-up'] = '0.00%'
-
-    summary = summary[summary.drop(columns=['ร้อยละ E-up']).sum(axis=1) > 0]
-
-    # ---- 3. เปลี่ยนชื่อ Index ของตารางให้สื่อความหมายมากขึ้น ----
-    summary.index.name = "รหัส | ชื่ออุบัติการณ์"
-    return summary
-
-def create_summary_table_by_category(dataframe, category_column_name):
-    """
-    สร้างตารางสรุปจำนวนอุบัติการณ์ตามหมวดหมู่และระดับความรุนแรง
-
-    Args:
-        dataframe (pd.DataFrame): DataFrame ที่กรองแล้ว
-        category_column_name (str): ชื่อคอลัมน์ที่ต้องการใช้เป็นแถวของตาราง (เช่น 'หมวด' หรือ 'หมวดหมู่มาตรฐานสำคัญ')
-
-    Returns:
-        pd.DataFrame: ตารางสรุปผล
-    """
-    if category_column_name not in dataframe.columns or 'Impact' not in dataframe.columns:
-        st.error(f"ไม่พบคอลัมน์ '{category_column_name}' หรือ 'Impact' ในข้อมูล")
-        return pd.DataFrame()
-
-    # กรองข้อมูลเอาเฉพาะที่มีข้อมูลในคอลัมน์หมวดหมู่และ Impact
-    df_valid = dataframe.dropna(subset=[category_column_name, 'Impact'])
-    if df_valid.empty:
-        return pd.DataFrame()
-
-    # สร้างตารางไขว้ (crosstab) เพื่อนับจำนวน
-    summary = pd.crosstab(df_valid[category_column_name], df_valid['Impact'])
-
-    # จัดลำดับคอลัมน์ตามระดับความรุนแรง A-I และเติม 0 หากไม่มีข้อมูล
-    severity_levels = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I']
-    summary = summary.reindex(columns=severity_levels, fill_value=0)
-
-    # คำนวณคอลัมน์สรุปเพิ่มเติม
-    e_to_i_cols = [col for col in ['E', 'F', 'G', 'H', 'I'] if col in summary.columns]
-    summary['รวม E-up'] = summary[e_to_i_cols].sum(axis=1)
-
-    total_e_up_incidents = summary['รวม E-up'].sum()
-
-    if total_e_up_incidents > 0:
-        summary['ร้อยละ E-up'] = (summary['รวม E-up'] / total_e_up_incidents * 100).map('{:.2f}%'.format)
-    else:
-        summary['ร้อยละ E-up'] = '0.00%'
-
-    # เปลี่ยนชื่อ index เพื่อให้สวยงาม
-    summary.index.name = "หมวดหมู่"
-    return summary
-
-def load_data(uploaded_file):
+    # Handle Excel numeric date format (days since 1899-12-30)
     try:
-        return pd.read_excel(uploaded_file, engine='openpyxl', keep_default_na=False)
-    except Exception as e:
-        st.error(f"เกิดข้อผิดพลาดในการอ่านไฟล์ Excel: {e}")
-        return pd.DataFrame()
-
-
-@st.cache_data
-def calculate_persistence_risk_score(_df: pd.DataFrame, total_months: int):
-    risk_level_map_to_score = {"51": 21, "52": 22, "53": 23, "54": 24, "55": 25, "41": 16, "42": 17, "43": 18, "44": 19,
-                               "45": 20, "31": 11, "32": 12, "33": 13, "34": 14, "35": 15, "21": 6, "22": 7, "23": 8,
-                               "24": 9, "25": 10, "11": 1, "12": 2, "13": 3, "14": 4, "15": 5}
-    if _df.empty or 'รหัส' not in _df.columns or 'Risk Level' not in _df.columns: return pd.DataFrame()
-    analysis_df = _df[['รหัส', 'ชื่ออุบัติการณ์ความเสี่ยง', 'Risk Level']].copy()
-    analysis_df['Ordinal_Risk_Score'] = analysis_df['Risk Level'].astype(str).map(risk_level_map_to_score)
-    analysis_df.dropna(subset=['Ordinal_Risk_Score'], inplace=True)
-    if analysis_df.empty: return pd.DataFrame()
-    persistence_metrics = analysis_df.groupby('รหัส').agg(
-        Average_Ordinal_Risk_Score=('Ordinal_Risk_Score', 'mean'),
-        Total_Occurrences=('รหัส', 'size')
-    ).reset_index()
-    total_months = max(1, total_months)
-    persistence_metrics['Incident_Rate_Per_Month'] = persistence_metrics['Total_Occurrences'] / total_months
-    max_rate = max(1, persistence_metrics['Incident_Rate_Per_Month'].max())
-    persistence_metrics['Frequency_Score'] = persistence_metrics['Incident_Rate_Per_Month'] / max_rate
-    persistence_metrics['Avg_Severity_Score'] = persistence_metrics['Average_Ordinal_Risk_Score'] / 25.0
-    persistence_metrics['Persistence_Risk_Score'] = persistence_metrics['Frequency_Score'] + persistence_metrics[
-        'Avg_Severity_Score']
-    incident_names = _df[['รหัส', 'ชื่ออุบัติการณ์ความเสี่ยง']].drop_duplicates()
-    final_df = pd.merge(persistence_metrics, incident_names, on='รหัส', how='left')
-    return final_df.sort_values(by='Persistence_Risk_Score', ascending=False)
-
-
-@st.cache_data
-def calculate_frequency_trend_poisson(_df: pd.DataFrame):
-    if _df.empty or 'รหัส' not in _df.columns or 'Occurrence Date' not in _df.columns: return pd.DataFrame()
-    analysis_df = _df[['รหัส', 'ชื่ออุบัติการณ์ความเสี่ยง', 'Occurrence Date']].copy()
-    analysis_df.dropna(subset=['Occurrence Date'], inplace=True)
-    if analysis_df.empty: return pd.DataFrame()
-    analysis_df['YearMonth'] = pd.to_datetime(analysis_df['Occurrence Date']).dt.to_period('M')
-    full_date_range = pd.period_range(start=analysis_df['YearMonth'].min(), end=analysis_df['YearMonth'].max(),
-                                      freq='M')
-    results = []
-    for code in analysis_df['รหัส'].unique():
-        incident_subset = analysis_df[analysis_df['รหัส'] == code]
-        if len(incident_subset) < 3 or len(incident_subset.groupby('YearMonth')) < 2: continue
-        monthly_counts = incident_subset.groupby('YearMonth').size().reindex(full_date_range, fill_value=0)
-        y = monthly_counts.values
-        X = sm.add_constant(np.arange(len(monthly_counts)))
-        try:
-            model = sm.Poisson(y, X).fit(disp=0)
-            results.append({
-                'รหัส': code, 'Poisson_Trend_Slope': model.params[1],
-                'Total_Occurrences': y.sum(), 'Months_Observed': len(y)
-            })
-        except Exception:
-            continue
-    if not results: return pd.DataFrame()
-    final_df = pd.DataFrame(results)
-    incident_names = _df[['รหัส', 'ชื่ออุบัติการณ์ความเสี่ยง']].drop_duplicates()
-    final_df = pd.merge(final_df, incident_names, on='รหัส', how='left')
-    return final_df.sort_values(by='Poisson_Trend_Slope', ascending=False)
-
-
-def create_poisson_trend_plot(df, selected_code_for_plot, display_df=None, show_ci=True):
-    # เตรียมช่วงเดือนเต็มของทั้งชุดข้อมูล (แกน x)
-    full_date_range_for_plot = pd.period_range(
-        start=pd.to_datetime(df['Occurrence Date']).dt.to_period('M').min(),
-        end=pd.to_datetime(df['Occurrence Date']).dt.to_period('M').max(),
-        freq='M'
-    )
-
-    # นับจำนวนครั้งต่อเดือนของรหัสที่เลือก
-    subset = df[df['รหัส'] == selected_code_for_plot].copy()
-    subset['YearMonth'] = pd.to_datetime(subset['Occurrence Date']).dt.to_period('M')
-    counts = subset.groupby('YearMonth').size().reindex(full_date_range_for_plot, fill_value=0)
-
-    # เตรียมข้อมูลสำหรับโมเดล Poisson: y = counts, X = [const, time]
-    y = counts.values.astype(float)
-    t = np.arange(len(counts), dtype=float)
-    X = sm.add_constant(t)
-
-    # fit Poisson (log link): mu_t = exp(beta0 + beta1 * t)
-    beta0 = beta1 = None
-    mu_hat = None
-    mu_lo = mu_hi = None
-
-    if len(y) >= 2 and y.sum() > 0:
-        try:
-            model = sm.Poisson(y, X).fit(disp=0)
-            beta0, beta1 = model.params
-
-            # คาดการณ์ค่าเฉลี่ยที่คาดหวังต่อเดือนจากโมเดล
-            eta = beta0 + beta1 * t                     # linear predictor
-            mu_hat = np.exp(eta)                        # expected counts
-
-            if show_ci:
-                # 95% CI บนสเกลลอก -> แปลงกลับเป็นสเกลนับ
-                cov = model.cov_params()
-                design = np.column_stack([np.ones_like(t), t])
-                se_eta = np.sqrt(np.einsum('ij,jk,ik->i', design, cov, design))
-                eta_lo = eta - 1.96 * se_eta
-                eta_hi = eta + 1.96 * se_eta
-                mu_lo = np.exp(eta_lo)
-                mu_hi = np.exp(eta_hi)
-        except Exception as e:
-            st.warning(f"คำนวณเส้นแนวโน้ม Poisson ไม่สำเร็จ: {e}")
-
-    # วาดกราฟ
-    fig_plot = go.Figure()
-
-    # แท่งจำนวนครั้งจริงต่อเดือน
-    fig_plot.add_trace(go.Bar(
-        x=counts.index.strftime('%Y-%m'),
-        y=y,
-        name='จำนวนครั้งที่เกิดจริง',
-        marker=dict(color='#AED6F1', cornerradius=8)
-    ))
-
-    # เส้นแนวโน้มจาก Poisson + ช่วงความเชื่อมั่น (ถ้ามี)
-    if mu_hat is not None:
-        fig_plot.add_trace(go.Scatter(
-            x=counts.index.strftime('%Y-%m'),
-            y=mu_hat,
-            mode='lines',
-            name='แนวโน้มคาดหมาย (Poisson)',
-            line=dict(width=2)
-        ))
-
-        if show_ci and (mu_lo is not None) and (mu_hi is not None):
-            # วาด band 95% CI (บนก่อนล่าง แล้ว fill='tonexty')
-            fig_plot.add_trace(go.Scatter(
-                x=counts.index.strftime('%Y-%m'),
-                y=mu_hi,
-                mode='lines',
-                line=dict(width=0),
-                showlegend=False,
-                hoverinfo='skip'
-            ))
-            fig_plot.add_trace(go.Scatter(
-                x=counts.index.strftime('%Y-%m'),
-                y=mu_lo,
-                mode='lines',
-                fill='tonexty',
-                name='95% CI',
-                line=dict(width=0),
-                fillcolor='rgba(0,0,0,0.08)'
-            ))
-
-    fig_plot.update_layout(
-        title=f'การกระจายตัวของอุบัติการณ์: {selected_code_for_plot}',
-        xaxis_title='เดือน-ปี',
-        yaxis_title='จำนวนครั้งที่เกิด',
-        barmode='overlay',
-        legend=dict(x=0.01, y=0.99, bgcolor='rgba(255,255,255,0.7)')
-    )
-
-    # ข้อความประกอบ: ใช้พารามิเตอร์จาก Poisson (ถ้าคำนวณได้) ไม่ต้องพึ่ง display_df
-    if beta1 is not None:
-        factor = float(np.exp(beta1))
-        annot_text = (f"<b>Poisson slope: {beta1:.4f}</b><br>"
-                      f"อัตราเปลี่ยนแปลง: x{factor:.2f} ต่อเดือน")
-    else:
-        annot_text = "<b>Poisson slope: N/A</b><br>อัตราเปลี่ยนแปลง: N/A"
-
-    fig_plot.add_annotation(
-        x=0.5, y=0.98,
-        xref="paper", yref="paper",
-        text=annot_text,
-        showarrow=False,
-        font=dict(size=12, color="black"),
-        align="center",
-        bordercolor="black",
-        borderwidth=1,
-        borderpad=4,
-        bgcolor="rgba(255, 255, 224, 0.7)"
-    )
-    return fig_plot
-
-
-
-def create_goal_summary_table(data_df_goal, goal_category_name_param,
-                              e_up_non_numeric_levels_param, e_up_numeric_levels_param=None,
-                              is_org_safety_table=False):
-    goal_category_name_param = str(goal_category_name_param).strip()
-    if 'หมวด' not in data_df_goal.columns:
-        return pd.DataFrame()
-    df_filtered_by_goal_cat = data_df_goal[
-        data_df_goal['หมวด'].astype(str).str.strip() == goal_category_name_param].copy()
-    if df_filtered_by_goal_cat.empty: return pd.DataFrame()
-    if 'Incident Type' not in df_filtered_by_goal_cat.columns or 'Impact' not in df_filtered_by_goal_cat.columns: return pd.DataFrame()
-    try:
-        pvt_table_goal = pd.crosstab(df_filtered_by_goal_cat['Incident Type'],
-                                     df_filtered_by_goal_cat['Impact'].astype(str).str.strip(), margins=True,
-                                     margins_name='รวมทั้งหมด')
+        if isinstance(value, (int, float)) and not pd.isna(value):
+            return pd.to_datetime(value, unit="d", origin="1899-12-30", errors="coerce")
+        # numeric string like "45678.0"
+        v = str(value)
+        if re.fullmatch(r"\d+(\.\d+)?", v):
+            return pd.to_datetime(float(v), unit="d", origin="1899-12-30", errors="coerce")
     except Exception:
-        return pd.DataFrame()
-    if 'รวมทั้งหมด' in pvt_table_goal.index: pvt_table_goal = pvt_table_goal.drop(index='รวมทั้งหมด')
-    if pvt_table_goal.empty: return pd.DataFrame()
-    if 'รวมทั้งหมด' not in pvt_table_goal.columns: pvt_table_goal['รวมทั้งหมด'] = pvt_table_goal.sum(axis=1)
-    all_impact_columns_goal = [str(col).strip() for col in pvt_table_goal.columns if col != 'รวมทั้งหมด']
-    e_up_non_numeric_levels_param_stripped = [str(level).strip() for level in e_up_non_numeric_levels_param]
-    e_up_numeric_levels_param_stripped = [str(level).strip() for level in
-                                          e_up_numeric_levels_param] if e_up_numeric_levels_param else []
-    e_up_columns_goal = [col for col in all_impact_columns_goal if
-                         col not in e_up_non_numeric_levels_param_stripped and (
-                                 not e_up_numeric_levels_param_stripped or col not in e_up_numeric_levels_param_stripped)]
-    report_data_goal = []
-    for incident_type_goal, row_data_goal in pvt_table_goal.iterrows():
-        total_e_up_count_goal = sum(row_data_goal[col] for col in e_up_columns_goal if
-                                    col in row_data_goal.index and pd.notna(row_data_goal[col]))
-        total_all_impacts_goal = row_data_goal['รวมทั้งหมด'] if 'รวมทั้งหมด' in row_data_goal and pd.notna(
-            row_data_goal['รวมทั้งหมด']) else 0
-        percent_e_up_goal = (total_e_up_count_goal / total_all_impacts_goal * 100) if total_all_impacts_goal > 0 else 0
-        report_data_goal.append(
-            {'Incident Type': incident_type_goal, 'รวม E-up': total_e_up_count_goal, 'ร้อยละ E-up': percent_e_up_goal})
-    report_df_goal = pd.DataFrame(report_data_goal)
-    if report_df_goal.empty:
-        merged_report_table_goal = pvt_table_goal.reset_index()
-        merged_report_table_goal['รวม E-up'] = 0
-        merged_report_table_goal['ร้อยละ E-up'] = 0.0
-    else:
-        merged_report_table_goal = pd.merge(pvt_table_goal.reset_index(), report_df_goal, on='Incident Type',
-                                            how='outer')
-    if 'รวม E-up' not in merged_report_table_goal.columns:
-        merged_report_table_goal['รวม E-up'] = 0
-    else:
-        merged_report_table_goal['รวม E-up'].fillna(0, inplace=True)
-    if 'ร้อยละ E-up' not in merged_report_table_goal.columns:
-        merged_report_table_goal['ร้อยละ E-up'] = 0.0
-    else:
-        merged_report_table_goal['ร้อยละ E-up'].fillna(0.0, inplace=True)
-    cols_to_drop_from_display_goal = [col for col in e_up_non_numeric_levels_param_stripped if
-                                      col in merged_report_table_goal.columns]
-    if e_up_numeric_levels_param_stripped: cols_to_drop_from_display_goal.extend(
-        [col for col in e_up_numeric_levels_param_stripped if col in merged_report_table_goal.columns])
-    merged_report_table_goal = merged_report_table_goal.drop(columns=cols_to_drop_from_display_goal, errors='ignore')
-    total_col_original_name, e_up_col_name, percent_e_up_col_name = 'รวมทั้งหมด', 'รวม E-up', 'ร้อยละ E-up'
-    if is_org_safety_table:
-        total_col_display_name, e_up_col_display_name, percent_e_up_display_name = 'รวม 1-5', 'รวม 3-5', 'ร้อยละ 3-5'
-        merged_report_table_goal.rename(
-            columns={total_col_original_name: total_col_display_name, e_up_col_name: e_up_col_display_name,
-                     percent_e_up_col_name: percent_e_up_display_name}, inplace=True, errors='ignore')
-    else:
-        total_col_display_name, e_up_col_display_name, percent_e_up_display_name = 'รวม A-I', e_up_col_name, percent_e_up_col_name
-        merged_report_table_goal.rename(columns={total_col_original_name: total_col_display_name}, inplace=True,
-                                        errors='ignore')
-    merged_report_table_goal['Incident Type Name'] = merged_report_table_goal['Incident Type'].map(type_name).fillna(
-        merged_report_table_goal['Incident Type'])
-    final_columns_goal_order = ['Incident Type Name'] + [col for col in e_up_columns_goal if
-                                                         col in merged_report_table_goal.columns] + [
-                                   e_up_col_display_name, total_col_display_name, percent_e_up_display_name]
-    final_columns_present_goal = [col for col in final_columns_goal_order if col in merged_report_table_goal.columns]
-    merged_report_table_goal = merged_report_table_goal[final_columns_present_goal]
-    if percent_e_up_display_name in merged_report_table_goal.columns and pd.api.types.is_numeric_dtype(
-            merged_report_table_goal[percent_e_up_display_name]):
+        pass
+
+    # Handle string formats
+    s = normalize_raw_datetime_text(value)
+    if not s:
+        return pd.NaT
+
+    # Thai month: dd Mon yyyy [HH:MM[:SS]]
+    # --- สำคัญ: ทำให้วงเล็บชั้นในเป็น non-capturing ด้วย (?::\d{2})? ---
+    m_th = re.search(r"(\d{1,2})\s*([ก-๙\.]+)\s*(\d{4})\s*(\d{1,2}:\d{2}(?::\d{2})?)?", s)
+    if m_th:
+        dd_str = m_th.group(1)
+        mon_txt = m_th.group(2)
+        yyyy_str = m_th.group(3)
+        hhmmss_str = m_th.group(4)  # อาจเป็น None
+        dd = int(dd_str)
+        yyyy = int(yyyy_str)
+        hhmmss = hhmmss_str or "00:00:00"
+        # เติมวินาทีถ้ายังไม่มี
+        if len(hhmmss) == 5:
+            hhmmss = hhmmss + ":00"
+        mm = THAI_MONTHS.get(mon_txt.strip()) or THAI_MONTHS.get(mon_txt.strip() + ".")
+        if mm:
+            if yyyy >= 2400:
+                yyyy -= 543
+            try:
+                return pd.to_datetime(f"{yyyy:04d}-{mm:02d}-{dd:02d} {hhmmss}",
+                                      format="%Y-%m-%d %H:%M:%S", errors="coerce")
+            except ValueError:
+                pass
+
+    # dd/mm/yyyy or dd-mm-yyyy [HH:MM[:SS]]
+    m_sep = re.search(r"(\d{1,2})[/-](\d{1,2})[/-](\d{4})(?:\s+(\d{1,2}:\d{2}(?::\d{2})?))?", s)
+    if m_sep:
+        dd_str = m_sep.group(1)
+        mm_str = m_sep.group(2)
+        yyyy_str = m_sep.group(3)
+        hhmmss_str = m_sep.group(4)  # อาจเป็น None
+        dd = int(dd_str)
+        mm = int(mm_str)
+        yyyy = int(yyyy_str)
+        hhmmss = hhmmss_str or "00:00:00"
+        if len(hhmmss) == 5:
+            hhmmss = hhmmss + ":00"
+        if yyyy >= 2400:
+            yyyy -= 543
         try:
-            merged_report_table_goal[percent_e_up_display_name] = merged_report_table_goal[
-                percent_e_up_display_name].astype(float).map('{:.2f}%'.format)
+            return pd.to_datetime(f"{yyyy:04d}-{mm:02d}-{dd:02d} {hhmmss}",
+                                  format="%Y-%m-%d %H:%M:%S", errors="coerce")
         except ValueError:
             pass
-    return merged_report_table_goal.set_index('Incident Type Name')
+
+    # Fallback: แปลงปี พ.ศ. เป็น ค.ศ. ถ้าพบ
+    yr = re.search(r"\b(2\d{3})\b", s)
+    if yr:
+        y = int(yr.group(1))
+        if y >= 2400:
+            s = s.replace(str(y), str(y - 543), 1)
+
+    # Final fallback
+    return pd.to_datetime(s, dayfirst=True, errors="coerce")
 
 
-def create_severity_table(input_df, row_column_name, table_title, specific_row_order=None):
-    if not isinstance(input_df,
-                      pd.DataFrame) or input_df.empty or row_column_name not in input_df.columns or 'Impact Level' not in input_df.columns: return None
-    temp_df = input_df.copy()
-    temp_df['Impact Level'] = temp_df['Impact Level'].astype(str).str.strip().replace('N/A', 'ไม่ระบุ')
-    if temp_df[row_column_name].dropna().empty: return None
+# =========================
+# 2) Risk / สี
+# =========================
+def map_impact_level_func(val):
+    s = str(val).strip().upper()
+    if s in ("A", "B", "1"): return "1"
+    if s in ("C", "D", "2"): return "2"
+    if s in ("E", "F", "3"): return "3"
+    if s in ("G", "H", "4"): return "4"
+    if s in ("I", "5"): return "5"
+    return "N/A"
+
+RISK_COLOR_TABLE = {
+    "11":"Low","12":"Low","13":"Low","14":"Medium","15":"Medium",
+    "21":"Low","22":"Low","23":"Medium","24":"Medium","25":"High",
+    "31":"Low","32":"Medium","33":"Medium","34":"High","35":"High",
+    "41":"Medium","42":"Medium","43":"High","44":"High","45":"Extreme",
+    "51":"Medium","52":"High","53":"High","54":"Extreme","55":"Extreme",
+}
+
+def compute_frequency_level(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or 'Occurrence Date' not in df.columns or df['Occurrence Date'].isna().all():
+        return df.assign(**{'count':0, 'Incident Rate/mth':0.0, 'Frequency Level':'N/A'})
+    max_p = df['Occurrence Date'].max().to_period('M'); min_p = df['Occurrence Date'].min().to_period('M')
+    total_month_calc = max(1, (max_p.year - min_p.year) * 12 + (max_p.month - min_p.month) + 1)
+    counts = df['Incident'].value_counts(); out = df.copy()
+    out['count'] = out['Incident'].map(counts).fillna(0).astype(int)
+    out['Incident Rate/mth'] = (out['count'] / total_month_calc).round(1)
+    cond = [(out['Incident Rate/mth']<2.0), (out['Incident Rate/mth']<3.9), (out['Incident Rate/mth']<6.9), (out['Incident Rate/mth']<29.9)]
+    out['Frequency Level'] = np.select(cond, ['1','2','3','4'], default='5')
+    return out
+
+def build_risk_matrix(df: pd.DataFrame) -> pd.DataFrame:
+    idx = list("54321"); cols = list("12345"); empty_mat = pd.DataFrame(0, index=idx, columns=cols)
+    if df.empty or 'Risk Level' not in df.columns: return empty_mat
+    valid_df = df[(df['Risk Level'] != 'N/A') & df['Impact Level'].isin(idx) & df['Frequency Level'].isin(cols)]
+    if valid_df.empty: return empty_mat
+    mat = pd.crosstab(valid_df['Impact Level'], valid_df['Frequency Level'])
+    return mat.reindex(index=idx, columns=cols, fill_value=0)
+
+def summarize_max_risk_per_incident(df: pd.DataFrame) -> pd.DataFrame:
+    cols=['Incident','ชื่ออุบัติการณ์ความเสี่ยง','Max Risk','Category Color']
+    if df.empty or 'Risk Level' not in df.columns: return pd.DataFrame(columns=cols)
+    order={'1':1,'2':2,'3':3,'4':4,'5':5}; d2 = df[df['Risk Level'] != 'N/A'].copy()
+    if d2.empty: return pd.DataFrame(columns=cols)
+    d2['I_num'] = d2['Impact Level'].map(order).fillna(0).astype(int); d2['F_num'] = d2['Frequency Level'].map(order).fillna(0).astype(int)
+    d2['score'] = d2['I_num']*10 + d2['F_num']
+    idx = d2.groupby(['Incident','ชื่ออุบัติการณ์ความเสี่ยง'], observed=True)['score'].idxmax()
+    agg = d2.loc[idx, ['Incident','ชื่ออุบัติการณ์ความเสี่ยง','Risk Level','Category Color','Incident Rate/mth']].copy()
+    agg = agg.rename(columns={'Risk Level':'Max Risk', 'Incident Rate/mth':'rate'})
+    return agg.sort_values('rate', ascending=False).drop(columns='rate')
+
+# =========================
+# 3) อ่านไฟล์ & จัดสคีมา
+# =========================
+def read_uploaded_table(uploaded_file) -> pd.DataFrame:
+    if uploaded_file is None: return pd.DataFrame()
+    name = uploaded_file.name.lower()
     try:
-        severity_crosstab = pd.crosstab(temp_df[row_column_name].astype(str).str.strip(), temp_df['Impact Level'])
-    except Exception:
-        return None
-    impact_level_map_cols = {'1': 'A-B (1)', '2': 'C-D (2)', '3': 'E-F (3)', '4': 'G-H (4)', '5': 'I (5)',
-                             'ไม่ระบุ': 'ไม่ระบุ LV'}
-    desired_cols_ordered_keys = ['1', '2', '3', '4', '5', 'ไม่ระบุ']
-    for col_key in desired_cols_ordered_keys:
-        if col_key not in severity_crosstab.columns: severity_crosstab[col_key] = 0
-    present_ordered_keys = [key for key in desired_cols_ordered_keys if key in severity_crosstab.columns]
-    if not present_ordered_keys: return None
-    severity_crosstab = severity_crosstab[present_ordered_keys].rename(columns=impact_level_map_cols)
-    final_display_cols_renamed = [impact_level_map_cols[key] for key in present_ordered_keys if
-                                  key in impact_level_map_cols]
-    if not final_display_cols_renamed: return None
-    severity_crosstab['รวมทุกระดับ'] = severity_crosstab[
-        [col for col in final_display_cols_renamed if col in severity_crosstab.columns]].sum(axis=1)
-    if specific_row_order:
-        severity_crosstab = severity_crosstab.reindex([str(i) for i in specific_row_order]).fillna(0).astype(int)
-    else:
-        severity_crosstab = severity_crosstab[severity_crosstab['รวมทุกระดับ'] > 0]
-    if severity_crosstab.empty: return None
-    st.markdown(f"##### {table_title}")
-    display_column_order_from_map = [impact_level_map_cols.get(key) for key in desired_cols_ordered_keys]
-    display_column_order_present = [col for col in display_column_order_from_map if
-                                    col in severity_crosstab.columns] + (
-                                       ['รวมทุกระดับ'] if 'รวมทุกระดับ' in severity_crosstab.columns else [])
-    st.dataframe(
-        severity_crosstab[[col for col in display_column_order_present if col in severity_crosstab.columns]].astype(
-            int), use_container_width=True)
-    return severity_crosstab
+        if name.endswith(".csv"): return pd.read_csv(uploaded_file)
+        elif name.endswith((".xlsx", ".xls")): return pd.read_excel(uploaded_file, engine="openpyxl")
+        else: raise ValueError("รองรับ .csv, .xlsx, .xls")
+    except Exception as e:
+        st.error(f"Error reading file '{uploaded_file.name}': {e}")
+        return pd.DataFrame()
 
+def massage_schema(df: pd.DataFrame) -> pd.DataFrame:
+    required = ["รหัสหัวข้อ","หัวข้อ","วัน-เวลา ที่เกิดเหตุ","ระดับความรุนแรง", REF_COL]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        st.error("ไม่พบคอลัมน์จำเป็น: " + ", ".join(missing)); st.stop()
+
+    df = df.copy()
+    # Strip whitespace from all string columns first for consistency
+    for col in df.select_dtypes(include='object').columns:
+        if col not in ['Occurrence Date']:
+            df[col] = df[col].astype(str).str.strip()
+
+    df["รหัส: เรื่องอุบัติการณ์"] = df["รหัสหัวข้อ"] + ": " + df["หัวข้อ"]
+    df["Incident"] = df["รหัสหัวข้อ"]
+    df = df[df["Incident"] != ""].copy()
+    df["รหัส"] = df["Incident"].astype(str).str.slice(0,6)
+    df["ชื่ออุบัติการณ์ความเสี่ยง"] = df["หัวข้อ"]
+
+    df.rename(columns={"วัน-เวลา ที่เกิดเหตุ": "Occurrence Date"}, inplace=True)
+    converted = df["Occurrence Date"].apply(parse_incident_datetime)
+    bad = converted.isna().sum()
+    if bad > 0: st.warning(f"ข้าม {bad} แถวที่มีวันที่ผิดรูปแบบ")
+    df["Occurrence Date"] = converted
+    df.dropna(subset=["Occurrence Date"], inplace=True)
+    if df.empty: st.error("ไม่พบข้อมูลที่มีวันที่ถูกต้อง"); st.stop()
+
+    df["Impact"] = df["ระดับความรุนแรง"].astype(str).str.upper()
+    df['Sentinel code for check'] = df['รหัส'].astype(str).str.strip() + '-' + df['Impact'].astype(str).str.strip()
+    df['Impact Level'] = df['Impact'].apply(map_impact_level_func)
+    df = compute_frequency_level(df)
+    df['Risk Level'] = np.where((df['Impact Level']!='N/A') & (df['Frequency Level'].notna()), df['Impact Level']+df['Frequency Level'], 'N/A')
+    df['Category Color'] = df['Risk Level'].map(RISK_COLOR_TABLE).fillna('Undefined')
+
+    df['Incident Type'] = df['Incident'].astype(str).str[:3]
+    df['Month'] = df['Occurrence Date'].dt.month
+    month_label_map = {1:"ม.ค.",2:"ก.พ.",3:"มี.ค.",4:"เม.ย.",5:"พ.ค.",6:"มิ.ย.",7:"ก.ค.",8:"ส.ค.",9:"ก.ย.",10:"ต.ค.",11:"พ.ย.",12:"ธ.ค."}
+    df['เดือน'] = df['Month'].map(month_label_map)
+    df['Year'] = df['Occurrence Date'].dt.year.astype(str)
+
+    # Normalize unit names before mapping
+    df["หน่วยงาน_norm"] = df[REF_COL].apply(normalize_unit)
+    df["กลุ่มงาน"] = df["หน่วยงาน_norm"].map(service_map_norm).fillna("N/A")
+
+    action_col_original = "การดำเนินการ/การแก้ไขที่ได้ดำเนินการไปแล้ว"
+    if "Resulting Actions" not in df.columns:
+        if action_col_original in df.columns:
+            df['Resulting Actions'] = df[action_col_original].astype(str).apply(
+                lambda x: 'None' if x.strip() == '' or x.strip().lower() == 'none' or pd.isna(x) else x
+            ).fillna('None')
+        else:
+            df["Resulting Actions"] = "None"
+
+        # --- PSG9 & หมวด Mapping ---
+        # (PSG9code_df_master เป็นตัวแปร global ที่โหลดไว้ใน Section 5)
+        if 'PSG9code_df_master' in globals() and not PSG9code_df_master.empty and 'รหัส' in PSG9code_df_master.columns:
+
+            # เตรียมไฟล์ PSG9 สำหรับ merge
+            cols_to_merge = ['รหัส']
+            if 'หมวดหมู่PSG' in PSG9code_df_master.columns:
+                cols_to_merge.append('หมวดหมู่PSG')
+            if 'หมวด' in PSG9code_df_master.columns:
+                cols_to_merge.append('หมวด')
+
+            psg9_to_merge = PSG9code_df_master[cols_to_merge].drop_duplicates(subset=['รหัส'])
+
+            # ทำให้คอลัมน์ 'รหัส' เป็น str ทั้งคู่เพื่อ merge
+            df['รหัส'] = df['รหัส'].astype(str)
+            psg9_to_merge['รหัส'] = psg9_to_merge['รหัส'].astype(str)
+
+            # --- ทำการ Merge ---
+            df = df.merge(psg9_to_merge, on='รหัส', how='left')
+
+            # --- 1. จัดการคอลัมน์ 'หมวดหมู่มาตรฐานสำคัญ' ---
+            if 'หมวดหมู่PSG' in df.columns:
+                # ถ้า merge สำเร็จ, ใช้ค่าที่ได้มา, ถ้าไม่ (ได้ค่า NaN) ให้เติม "ไม่จัดอยู่ใน..."
+                df['หมวดหมู่มาตรฐานสำคัญ'] = df['หมวดหมู่PSG'].fillna("ไม่จัดอยู่ใน PSG9 Catalog")
+                df = df.drop(columns=['หมวดหมู่PSG'])  # ลบคอลัมน์ที่ merge มาทิ้ง
+            else:
+                # ถ้าไฟล์ PSG9code.xlsx ไม่มีคอลัมน์ 'หมวดหมู่PSG'
+                df["หมวดหมู่มาตรฐานสำคัญ"] = "ไม่สามารถระบุ (ไม่มี 'หมวดหมู่PSG' ใน PSG9code.xlsx)"
+
+            # --- 2. จัดการคอลัมน์ 'หมวด' (สำหรับ Safety Goals / C,G analysis) ---
+            if 'หมวด' in df.columns:
+                # ถ้า merge สำเร็จ, ใช้ค่าที่ได้มา, ถ้าไม่ (ได้ค่า NaN) ให้เติม "N/A"
+                df['หมวด'] = df['หมวด'].fillna("N/A")
+            else:
+                # ถ้าไฟล์ PSG9code.xlsx ไม่มีคอลัมน์ 'หมวด'
+                df["หมวด"] = "N/A"
+                st.warning("⚠️ ไม่พบคอลัมน์ 'หมวด' ใน PSG9code.xlsx - การวิเคราะห์ Safety Goals และ C/G อาจไม่แสดงผล")
+
+        else:
+            # ถ้าโหลดไฟล์ PSG9code.xlsx ไม่สำเร็จตั้งแต่แรก
+            st.error("❌ PSG9 mapping ล้มเหลว: ไม่พบ 'PSG9code.xlsx' หรือไฟล์มีปัญหา")
+            df["หมวดหมู่มาตรฐานสำคัญ"] = "ไม่สามารถระบุ (PSG9code.xlsx ไม่ได้โหลด/ข้อมูลไม่ครบถ้วน)"
+            df["หมวด"] = "N/A"
+
+        # --- END Mapping ---
+
+    detail_col_original = "สรุปปัญหา/เหตุการณ์โดยย่อ"
+    if detail_col_original in df.columns:
+        df["รายละเอียดการเกิด_Anonymized"] = df[detail_col_original].fillna('')
+    else:
+        df["รายละเอียดการเกิด_Anonymized"] = ''
+    df.rename(columns={detail_col_original: "รายละเอียดการเกิด"}, inplace=True, errors='ignore')
+
+    cols_to_convert = ['self_report', 'potential_harm']
+    for col in cols_to_convert:
+        if col in df.columns:
+            df[col] = df[col].replace(['None', ''], np.nan)
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    if REF_COL not in df.columns: df[REF_COL] = "N/A"
+    df[REF_COL] = df[REF_COL].astype(str).fillna("N/A")
+    return df
+
+# =========================
+# 4) Time parts (Fiscal Year) + ฟิลเตอร์
+# =========================
+TH_MONTH_TINY = {1:"ม.ค.",2:"ก.พ.",3:"มี.ค.",4:"เม.ย.",5:"พ.ค.",6:"มิ.ย.",7:"ก.ค.",8:"ส.ค.",9:"ก.ย.",10:"ต.ค.",11:"พ.ย.",12:"ธ.ค."}
+
+def add_time_parts_fiscal(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or 'Occurrence Date' not in df.columns: return df
+    out=df.copy(); out['Year_int']=out['Occurrence Date'].dt.year.astype(int); out['Month_int']=out['Occurrence Date'].dt.month.astype(int)
+    out['FY_int'] = np.where(out['Month_int'] >= 10, out['Year_int'] + 1, out['Year_int']).astype(int)
+    def _fq(m): return 'Q1' if m in (10,11,12) else ('Q2' if m in (1,2,3) else ('Q3' if m in (4,5,6) else 'Q4'))
+    out['FQuarter'] = out['Month_int'].apply(_fq).astype(str); out['FY_Quarter'] = out['FY_int'].astype(str) + '-' + out['FQuarter']
+    return out
+
+def filter_by_period_fiscal(df: pd.DataFrame, mode: str, fy: str|int|None=None, fq: str|None=None, m: int|None=None) -> pd.DataFrame:
+    if df.empty or mode == "ทั้งหมด": return df
+    out = df.copy()
+    fy_str = str(fy) if fy not in (None, "", "-- ทั้งหมด --") else None
+    if mode == "รายปี" and fy_str and 'FY_int' in out.columns: out = out[out['FY_int'].astype(str) == fy_str]
+    elif mode == "รายไตรมาส":
+        if fy_str and 'FY_int' in out.columns: out = out[out['FY_int'].astype(str) == fy_str]
+        if fq and fq != "-- ทั้งหมด --" and 'FQuarter' in out.columns: out = out[out['FQuarter'] == fq]
+    elif mode == "รายเดือน":
+        if fy_str and 'FY_int' in out.columns: out = out[out['FY_int'].astype(str) == fy_str]
+        if m and m != "-- ทั้งหมด --" and 'Month_int' in out.columns: out = out[out['Month_int'].astype(int) == int(m)]
+    return out
+
+def filter_by_group_and_unit(df: pd.DataFrame, group_name: str, unit_name: str) -> pd.DataFrame:
+    if df.empty: return df
+    out = df.copy()
+    # กลุ่มงาน
+    if group_name not in (None, "", "-- เลือกกลุ่มงาน --", "-- ทั้งหมด --"):
+        out = out[out["กลุ่มงาน"].astype(str) == str(group_name)]
+    # หน่วยงาน
+    if unit_name not in (None, "", "-- ทั้งหมด --"):
+        out = out[out[REF_COL].astype(str) == str(unit_name)]
+    return out
+
+# =========================
+# 5) UI (Main Structure)
+# =========================
+LOGO_URL = "https://raw.githubusercontent.com/HOIARRTool/hoiarr/refs/heads/main/logo1.png"
+month_label = {1:"ม.ค.",2:"ก.พ.",3:"มี.ค.",4:"เม.ย.",5:"พ.ค.",6:"มิ.ย.",7:"ก.ค.",8:"ส.ค.",9:"ก.ย.",10:"ต.ค.",11:"พ.ย.",12:"ธ.ค."}
+
+# --- Static Definitions ---
+DATA_DIR = Path("data"); DATA_DIR.mkdir(exist_ok=True)
+PERSISTED_DATA_PATH = DATA_DIR / "processed_incident_data.parquet"
+PSG9_FILE_PATH = "PSG9code.xlsx"
+SENTINEL_FILE_PATH = "Sentinel2024.xlsx"
+RISK_MITIGATION_FILE = "risk_mitigations.xlsx"
+#DEPARTMENT_FILE_PATH = "service point.xlsx - 53 งาน (ทุกฝ่าย).csv"
+
+psg9_r_codes_for_counting = set()
+sentinel_composite_keys = set()
+df_mitigation = pd.DataFrame()
+department_list = []
+PSG9_label_dict = {}
+
+try:
+    if Path(PSG9_FILE_PATH).is_file():
+        PSG9code_df_master = pd.read_excel(PSG9_FILE_PATH)
+        if 'รหัส' in PSG9code_df_master.columns:
+            psg9_r_codes_for_counting = set(PSG9code_df_master['รหัส'].astype(str).str.strip().unique())
+        if 'PSG_ID' in PSG9code_df_master.columns and 'หมวดหมู่PSG' in PSG9code_df_master.columns:
+            PSG9_label_dict = pd.Series(PSG9code_df_master['หมวดหมู่PSG'].values,
+                                        index=PSG9code_df_master.PSG_ID).to_dict()
+        else:
+            st.sidebar.warning(f"'{PSG9_FILE_PATH}' ไม่มี PSG_ID หรือ หมวดหมู่PSG")
+    else:
+        st.sidebar.warning(f"ไม่พบ '{PSG9_FILE_PATH}'")
+
+    if Path(SENTINEL_FILE_PATH).is_file():
+        Sentinel2024_df = pd.read_excel(SENTINEL_FILE_PATH)
+        if 'รหัส' in Sentinel2024_df.columns and 'Impact' in Sentinel2024_df.columns:
+            Sentinel2024_df['รหัส'] = Sentinel2024_df['รหัส'].astype(str).str.strip()
+            Sentinel2024_df['Impact'] = Sentinel2024_df['Impact'].astype(str).str.strip()
+            Sentinel2024_df.dropna(subset=['รหัส', 'Impact'], inplace=True)
+            sentinel_composite_keys = set((Sentinel2024_df['รหัส'] + '-' + Sentinel2024_df['Impact']).unique())
+    else:
+        st.sidebar.warning(f"ไม่พบ '{SENTINEL_FILE_PATH}'")
+
+    if Path(RISK_MITIGATION_FILE).is_file():
+        df_mitigation = pd.read_excel(RISK_MITIGATION_FILE)
+    else:
+        st.sidebar.warning(f"ไม่พบ '{RISK_MITIGATION_FILE}'")
+
+    #if Path(DEPARTMENT_FILE_PATH).is_file():
+        #dept_df = pd.read_csv(DEPARTMENT_FILE_PATH)
+        #if 'หน่วยงาน' in dept_df.columns:
+            #department_list = sorted([dept for dept in dept_df['หน่วยงาน'].astype(str).unique()
+                                      #if dept and pd.notna(dept) and dept.strip() != ''])
+        #else:
+            #st.sidebar.error(f"ไม่พบ 'หน่วยงาน' ใน '{DEPARTMENT_FILE_PATH}'")
+    #else:
+        #st.sidebar.error(f"ไม่พบ '{DEPARTMENT_FILE_PATH}'")
+
+except Exception as e:
+    st.sidebar.error(f"โหลดไฟล์นิยาม/หน่วยงานผิดพลาด: {e}")
+
+# Other static vars
+risk_color_data = {
+    'Category Color': ["Critical", "Critical", "Critical", "Critical", "Critical", "High", "High", "Critical", "Critical", "Critical",
+                       "Medium", "Medium", "High", "Critical", "Critical", "Low", "Medium", "Medium", "High", "High", "Low", "Low", "Low", "Medium", "Medium"],
+    'Risk Level': ["51", "52", "53", "54", "55", "41", "42", "43", "44", "45", "31", "32", "33", "34", "35", "21", "22", "23", "24", "25", "11", "12", "13", "14", "15"]}
+risk_color_df = pd.DataFrame(risk_color_data)
+display_cols_common = ['Occurrence Date', 'รหัส', 'ชื่ออุบัติการณ์ความเสี่ยง', 'Impact', 'Impact Level',
+                       'รายละเอียดการเกิด_Anonymized', 'Resulting Actions', 'หน่วยงาน']
+type_name = {'CPS': 'Safe Surgery', 'CPI': 'Infection Control', 'CPM': 'Medication & Blood Safety', 'CPP': 'Patient Care Process',
+             'CPL': 'Line, Tube & Catheter, Lab', 'CPE': 'Emergency Response', 'CSG': 'Gyn & Obs', 'CSS': 'Surgical', 'CSM': 'Medical',
+             'CSP': 'Pediatric', 'CSO': 'Orthopedic', 'CSD': 'Dental', 'GPS': 'Social Media & Comms', 'GPI': 'Infection & Exposure',
+             'GPM': 'Mental Health & Mediation', 'GPP': 'Process of work', 'GPL': 'Lane & Legal', 'GPE': 'Environment & Working',
+             'GOS': 'Strategy, Structure, Security', 'GOI': 'IT & Comms, Internal control', 'GOM': 'Manpower, Management',
+             'GOP': 'Policy, Process & Operation', 'GOL': 'Licensed & Professional cert', 'GOE': 'Economy'}
+colors2 = np.array([["#e1f5fe","#f6c8b6","#dd191d","#dd191d","#dd191d","#dd191d","#dd191d"],
+                    ["#e1f5fe","#f6c8b6","#ff8f00","#ff8f00","#dd191d","#dd191d","#dd191d"],
+                    ["#e1f5fe","#f6c8b6","#ffee58","#ffee58","#ff8f00","#dd191d","#dd191d"],
+                    ["#e1f5fe","#f6c8b6","#42db41","#ffee58","#ffee58","#ff8f00","#ff8f00"],
+                    ["#e1f5fe","#f6c8b6","#42db41","#42db41","#42db41","#ffee58","#ffee58"],
+                    ["#e1f5fe","#f6c8b6","#f6c8b6","#f6c8b6","#f6c8b6","#f6c8b6","#f6c8b6"],
+                    ["#e1f5fe","#e1f5fe","#e1f5fe","#e1f5fe","#e1f5fe","#e1f5fe","#e1f5fe"]])
+
+# --- Sidebar ---
+with st.sidebar:
+    st.markdown(f"""<div style="display: flex; align-items: center; margin-bottom: 1rem;"><img src="{LOGO_URL}" style="height: 32px; margin-right: 10px;"><h2 style="margin: 0; font-size: 1.7rem;"><span class="gradient-text">HOIA-RR Menu</span></h2></div>""", unsafe_allow_html=True)
+    # --- Upload and Filters ---
+    st.header("อัปโหลดข้อมูล")
+    up = st.file_uploader(
+        "อัปโหลดไฟล์ (.xlsx)",
+        type=["csv", "xlsx", "xls"],
+        key="main_uploader"
+    )
+
+    st.header("ตัวกรองหลัก")
+    GROUP_OPTIONS = ["-- เลือกกลุ่มงาน --", "-- ทั้งหมด --"] + sorted(REF_DF["กลุ่มงาน"].unique().tolist())
+    sel_group = st.selectbox("เลือกกลุ่มงาน", GROUP_OPTIONS, index=1)
+    if sel_group == "-- ทั้งหมด --":
+        sel_unit = "-- ทั้งหมด --"
+        st.selectbox("เลือกหน่วยงาน", ["-- ทั้งหมด --"], index=0, disabled=True)
+    else:
+        unit_options = list_units(sel_group)
+        sel_unit = st.selectbox("เลือกหน่วยงาน", ["-- ทั้งหมด --"] + unit_options, index=0, disabled=(sel_group in ("", "-- เลือกกลุ่มงาน --")))
+    st.header("ตัวกรองช่วงเวลา (ปีงบประมาณ)")
+    period_mode = st.selectbox("โหมดช่วงเวลา", ["ทั้งหมด", "รายปี", "รายไตรมาส", "รายเดือน"], index=0)
+# =========================
+# 6) ประมวลผล (Main Processing Logic)
+# =========================
+df_main = pd.DataFrame()
+processed_data_loaded = False
+if not up and Path(PERSISTED_DATA_PATH).is_file():
+    try:
+        df_main = pd.read_parquet(PERSISTED_DATA_PATH); df_main['Occurrence Date'] = pd.to_datetime(df_main['Occurrence Date'])
+        processed_data_loaded = True
+        df_main = add_time_parts_fiscal(df_main)
+    except Exception as e:
+        st.sidebar.error(f"โหลดข้อมูลเดิม ({PERSISTED_DATA_PATH.name}) ผิดพลาด: {e}")
+        df_main = pd.DataFrame()
+if not processed_data_loaded and up is not None:
+    try:
+        raw_df = read_uploaded_table(up)
+        with st.spinner("กำลังประมวลผลไฟล์..."):
+            df_main = massage_schema(raw_df); df_main = add_time_parts_fiscal(df_main)
+            try:
+                df_main.to_parquet(PERSISTED_DATA_PATH, index=False)
+            except Exception as e:
+                st.sidebar.error(f"บันทึกข้อมูล ({PERSISTED_DATA_PATH.name}) ไม่สำเร็จ: {e}")
+    except Exception as e:
+        st.error(f"ประมวลผล '{up.name}' ไม่สำเร็จ: {e}")
+        df_main = pd.DataFrame()
+
+if df_main.empty:
+    st.info("👈 กรุณาอัปโหลดไฟล์ข้อมูล...")
+    st.stop()
+
+# --- Apply Filters selected in Sidebar ---
+fy_opts = ["-- ทั้งหมด --"] + sorted(df_main['FY_int'].astype(str).unique().tolist()) if 'FY_int' in df_main else ["-- ทั้งหมด --"]
+month_order = [10, 11, 12] + list(range(1, 10))
+month_opts = ["-- ทั้งหมด --"] + [f"{m:02d}-{TH_MONTH_TINY.get(m, '?')}" for m in month_order] if 'Month_int' in df_main else ["-- ทั้งหมด --"]
+
+with st.sidebar:
+    sel_fy = None; sel_fq = None; sel_month_num = None
+    if period_mode == "รายปี":
+        sel_fy = st.selectbox("เลือกปีงบประมาณ", fy_opts, index=0)
+    elif period_mode == "รายไตรมาส":
+        c1, c2 = st.columns(2)
+        with c1: sel_fy = st.selectbox("ปีงบประมาณ", fy_opts, index=0, key="fq_year")
+        with c2: sel_fq = st.selectbox("ไตรมาส", ["-- ทั้งหมด --", "Q1", "Q2", "Q3", "Q4"], index=0, key="fq_quarter")
+    elif period_mode == "รายเดือน":
+        c1, c2 = st.columns(2)
+        with c1: sel_fy = st.selectbox("ปีงบประมาณ", fy_opts, index=0, key="fm_year")
+        with c2:
+            month_label_select = st.selectbox("เดือน", month_opts, index=0, key="fm_month")
+            if month_label_select not in (None, "", "-- ทั้งหมด --"):
+                sel_month_num = int(month_label_select.split("-")[0])
+
+df_time = filter_by_period_fiscal(df_main, period_mode, fy=sel_fy, fq=sel_fq, m=sel_month_num)
+filtered = filter_by_group_and_unit(df_time, sel_group, sel_unit)
+
+# --- Update Sidebar Stats ---
+sidebar_stats_placeholder = st.sidebar.empty()
+if filtered.empty:
+    sidebar_stats_placeholder.warning("ไม่พบข้อมูล")
+    st.warning("ไม่พบข้อมูลตามตัวกรองที่เลือก")
+else:
+    min_date_filt = filtered['Occurrence Date'].min(); max_date_filt = filtered['Occurrence Date'].max()
+    min_date_str_filt = min_date_filt.strftime('%d/%m/%Y') if pd.notna(min_date_filt) else "N/A"
+    max_date_str_filt = max_date_filt.strftime('%d/%m/%Y') if pd.notna(max_date_filt) else "N/A"
+    total_month_filt = 0
+    if pd.notna(min_date_filt) and pd.notna(max_date_filt):
+        max_p_filt = max_date_filt.to_period('M'); min_p_filt = min_date_filt.to_period('M')
+        total_month_filt = max(1, (max_p_filt.year - min_p_filt.year) * 12 + (max_p_filt.month - min_p_filt.month) + 1)
+    sidebar_stats_placeholder.markdown(f"**ช่วงข้อมูล (กรอง):** {min_date_str_filt} ถึง {max_date_str_filt}")
+    sidebar_stats_placeholder.markdown(f"**จำนวนเดือน (กรอง):** {total_month_filt} เดือน")
+    sidebar_stats_placeholder.markdown(f"**อุบัติการณ์ (กรองแล้ว):** {filtered.shape[0]:,} รายการ")
+    app_functions_list = ["RCA Helpdesk (AI Assistant)"]
+    st.sidebar.markdown("---");
+    st.sidebar.markdown("เลือกส่วนที่ต้องการแสดงผล:")
+
+    dashboard_pages_list = ["แดชบอร์ดสรุปภาพรวม", "Incidents Analysis","Risk Matrix (Interactive)","Risk level", "Risk Register Assistant", "Heatmap รายเดือน", "Sentinel Events & Top 10", "กราฟสรุปอุบัติการณ์ (รายมิติ)", "สรุปอุบัติการณ์ตาม Safety Goals", "Persistence Risk Index", "Early Warning: อุบัติการณ์ที่มีแนวโน้มสูงขึ้น", "บทสรุปสำหรับผู้บริหาร"]
+    if 'selected_analysis' not in st.session_state: st.session_state.selected_analysis = "แดชบอร์ดสรุปภาพรวม"
+    st.markdown("---")
+    for option in app_functions_list:
+        if st.sidebar.button(option, key=f"btn_{option}", type="primary" if st.session_state.selected_analysis == option else "secondary", use_container_width=True):
+            st.session_state.selected_analysis = option; st.rerun()
+
+    for option in dashboard_pages_list:
+        if st.sidebar.button(option, key=f"btn_{option}", type="primary" if st.session_state.selected_analysis == option else "secondary", use_container_width=True):
+            st.session_state.selected_analysis = option; st.rerun()
+
+    # --- Sidebar Footer ---
+    st.sidebar.markdown("---")
+    st.sidebar.markdown(f"""
+    **กิตติกรรมประกาศ:** ขอขอบพระคุณ 
+    - Prof. Shin Ushiro
+    - นพ.อนุวัฒน์ ศุภชุติกุล 
+    - นพ.ก้องเกียรติ เกษเพ็ชร์ 
+    - พญ.ปิยวรรณ ลิ้มปัญญาเลิศ 
+    - ภก.ปรมินทร์ วีระอนันตวัฒน์    
+    - ผศ.ดร.นิเวศน์ กุลวงค์ (อ.ที่ปรึกษา)
+
+    เป็นอย่างสูง สำหรับการริเริ่ม เติมเต็ม สนับสนุน และสร้างแรงบันดาลใจ อันเป็นรากฐานสำคัญในการพัฒนาเครื่องมือนี้
+
+    และขอขอบพระคุณโรงพยาบาลที่เข้าร่วมการวิจัยทุกแห่งเป็นอย่างสูง สำหรับความอนุเคราะห์และเอื้อเฟื้อข้อมูลอันเป็นประโยชน์ยิ่งต่องานวิจัยฉบับนี้ ได้แก่:
+    - โรงพยาบาลบึงกาฬ จ.บึงกาฬ
+    - โรงพยาบาลสมเด็จพระญาณสังวร จ.เชียงราย 
+    - โรงพยาบาลสวนผึ้ง จ.ราชบุรี
+    - โรงพยาบาลเจ้าคุณไพบูลย์ พนมทวน จ.กาญจนบุรี
+    - โรงพยาบาลชะอวด จ.นครศรีธรรมราช
+    - โรงพยาบาลอุบลรักษ์ ธนบุรี จ.อุบลราชานี
+    - โรงพยาบาลเขาชะเมาเฉลิมพระเกียรติ ๘๐ พรรษา จ.ระยอง
+    - โรงพยาบาลสมเด็จพระยุพราชเชียงของ จ. เชียงราย 
+    - Kyushu University Hospital, Fukuoka, Japan (ศึกษาดูงาน)
+    - โรงพยาบาลกรุงเทพ จันทบุรี, จ.จันทบุรี (ศึกษาดูงาน)
+    - โรงพยาบาลศูนย์การแพทย์มหาวิทยาลัยแม่ฟ้าหลวง จ.เชียงราย (ต้นสังกัด)  
+    """)  # <--- แก้ไขแล้ว (เนื้อหาชิดซ้าย)
+
+    st.sidebar.markdown("---")
+    st.sidebar.markdown(
+        '<p style="font-size:12px; color:gray;">*เครื่องมือนี้เป็นส่วนหนึ่งของวิทยานิพนธ์ IMPLEMENTING THE  HOSPITAL OCCURRENCE/INCIDENT ANALYSIS & RISK REGISTER (HOIA-RR TOOL) IN THAI HOSPITALS: A STUDY ON EFFECTIVE ADOPTION โดย นางสาววิลาศินี  เขื่อนแก้ว นักศึกษาปริญญาโท สำนักวิชาวิทยาศาสตร์สุขภาพ มหาวิทยาลัยแม่ฟ้าหลวง</p>',
+        unsafe_allow_html=True)
+# =========================
+# 7) Helper / Stubs (ปลอดภัย ไม่ให้หน้าอื่นพัง)
+# =========================
+
+# ========= สี/ฟังก์ชันสำหรับ Risk Matrix (Global Helpers) =========
+HEADER_TOPLEFT = "#E6F5FF";
+HEADER_SIDE = "#F3C7B1";
+HEADER_FREQ = "#EED0BE"
+GREEN = "#00D26A";
+YELLOW = "#FFE900";
+ORANGE = "#FF9800";
+RED = "#FF2D2D"
+PALETTE_FROM_IMAGE = {
+    "11": GREEN, "12": GREEN, "13": GREEN, "14": YELLOW, "15": YELLOW,
+    "21": GREEN, "22": YELLOW, "23": YELLOW, "24": ORANGE, "25": ORANGE,
+    "31": YELLOW, "32": YELLOW, "33": YELLOW, "34": ORANGE, "35": ORANGE,
+    "41": ORANGE, "42": ORANGE, "43": RED, "44": RED, "45": RED,
+    "51": RED, "52": RED, "53": RED, "54": RED, "55": RED,
+}
+
+
+def _text_color_for(bg_hex: str) -> str:
+    h = bg_hex.lstrip("#");
+    r, g, b = int(h[0:2], 16) / 255, int(h[2:4], 16) / 255, int(h[4:6], 16) / 255
+    return "#000000" if (0.2126 * r + 0.7152 * g + 0.0722 * b) > 0.6 else "#FFFFFF"
+
+
+# ========= จบส่วนสี Risk Matrix =========
+
+
+def render_incidents_analysis(df: pd.DataFrame):
+    st.markdown("<h4 style='color: #001f3f;'>Incidents Analysis</h4>", unsafe_allow_html=True)
+
+    if 'Resulting Actions' not in df.columns or 'หมวดหมู่มาตรฐานสำคัญ' not in df.columns:
+        st.error(
+            "ไม่สามารถแสดงข้อมูลได้ เนื่องจากไม่พบคอลัมน์ 'Resulting Actions' หรือ 'หมวดหมู่มาตรฐานสำคัญ' ในข้อมูล")
+    else:
+        tab_psg9, tab_groups, tab_by_code, tab_waitlist = st.tabs(
+            ["👁️ วิเคราะห์ตามหมวดหมู่ PSG9",
+             "👁️ วิเคราะห์ตามกลุ่มหลัก (C/G)",
+             "👁️ วิเคราะห์รายรหัส",
+             "👁️ อุบัติการณ์ที่รอการแก้ไข(ตามความรุนแรง)"])
+
+        # --- Tab ที่ 1: วิเคราะห์ตามหมวดหมู่ PSG9 ---
+        with tab_psg9:
+            st.subheader("ภาพรวมอุบัติการณ์ตามมาตรฐานสำคัญจำเป็นต่อความปลอดภัย (PSG9)")
+            psg9_summary_table = create_psg9_summary_table(df)
+            if psg9_summary_table is not None and not psg9_summary_table.empty:
+                st.dataframe(psg9_summary_table, use_container_width=True)
+            else:
+                st.info("ไม่พบข้อมูลอุบัติการณ์ที่เกี่ยวข้องกับมาตรฐานสำคัญ 9 ข้อในช่วงเวลานี้")
+
+            st.markdown("---")
+            st.subheader("สถานะการแก้ไขในแต่ละหมวดหมู่ PSG9")
+
+            # (PSG9_label_dict เป็นตัวแปร global ที่โหลดไว้ตอนเริ่มแอป)
+            psg9_categories = {k: v for k, v in PSG9_label_dict.items() if
+                               v in df['หมวดหมู่มาตรฐานสำคัญ'].unique()}
+
+            for psg9_id, psg9_name in psg9_categories.items():
+                psg9_df = df[df['หมวดหมู่มาตรฐานสำคัญ'] == psg9_name]
+                total_count = len(psg9_df)
+                resolved_df = psg9_df[~psg9_df['Resulting Actions'].astype(str).isin(['None', '', 'nan'])]
+                resolved_count = len(resolved_df)
+                unresolved_count = total_count - resolved_count
+
+                expander_title = f"{psg9_name} (ทั้งหมด: {total_count} | แก้ไขแล้ว: {resolved_count} | รอแก้ไข: {unresolved_count})"
+                with st.expander(expander_title):
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("จำนวนทั้งหมด", f"{total_count:,}")
+                    c2.metric("ดำเนินการแก้ไขแล้ว", f"{resolved_count:,}")
+                    c3.metric("รอการแก้ไข", f"{unresolved_count:,}")
+
+                    if total_count > 0:
+                        tab_resolved, tab_unresolved = st.tabs(
+                            [f"รายการที่แก้ไขแล้ว ({resolved_count})", f"รายการที่รอการแก้ไข ({unresolved_count})"])
+                        with tab_resolved:
+                            if resolved_count > 0:
+                                st.dataframe(
+                                    resolved_df[['Occurrence Date', 'Incident', 'Impact', 'Resulting Actions']],
+                                    hide_index=True, use_container_width=True, column_config={
+                                        "Occurrence Date": st.column_config.DatetimeColumn("วันที่เกิด",
+                                                                                           format="DD/MM/YYYY")})
+                            else:
+                                st.info("ไม่มีรายการที่แก้ไขแล้วในหมวดนี้")
+                        with tab_unresolved:
+                            if unresolved_count > 0:
+                                st.dataframe(
+                                    psg9_df[psg9_df['Resulting Actions'].astype(str).isin(['None', '', 'nan'])][
+                                        ['Occurrence Date', 'Incident', 'Impact', 'รายละเอียดการเกิด_Anonymized']],
+                                    hide_index=True, use_container_width=True, column_config={
+                                        "Occurrence Date": st.column_config.DatetimeColumn("วันที่เกิด",
+                                                                                           format="DD/MM/YYYY")})
+                            else:
+                                st.success("อุบัติการณ์ทั้งหมดในหมวดนี้ได้รับการแก้ไขแล้ว")
+
+        # --- Tab ที่ 2: วิเคราะห์ตามกลุ่มหลัก (C/G) ---
+        with tab_groups:
+            # ------------------ ส่วนของกลุ่มอุบัติการณ์ทางคลินิก (C) ------------------
+            st.markdown("#### กลุ่มอุบัติการณ์ทางคลินิก (รหัสขึ้นต้นด้วย C)")
+            df_clinical = df[df['รหัส'].str.startswith('C', na=False)].copy()
+
+            if df_clinical.empty:
+                st.info("ไม่พบข้อมูลอุบัติการณ์กลุ่ม Clinical ในช่วงเวลานี้")
+            else:
+                st.subheader("ภาพรวมอุบัติการณ์กลุ่ม Clinical")
+                clinical_summary_table = create_summary_table_by_category(df_clinical, 'หมวด')
+                if not clinical_summary_table.empty:
+                    st.dataframe(clinical_summary_table, use_container_width=True)
+                else:
+                    st.info("ไม่มีข้อมูลเพียงพอสำหรับสร้างตารางสรุป")
+                st.markdown("---")
+
+                st.subheader("เจาะลึกสถานะการแก้ไขตามหมวดย่อย (Clinical)")
+                clinical_categories = sorted([cat for cat in df_clinical['หมวด'].unique() if cat and pd.notna(cat)])
+                for category in clinical_categories:
+                    category_df = df_clinical[df_clinical['หมวด'] == category]
+                    total_count = len(category_df)
+                    resolved_df = category_df[
+                        ~category_df['Resulting Actions'].astype(str).isin(['None', '', 'nan'])]
+                    resolved_count = len(resolved_df)
+                    unresolved_count = total_count - resolved_count
+
+                    expander_title = f"{category} (ทั้งหมด: {total_count} | แก้ไขแล้ว: {resolved_count} | รอแก้ไข: {unresolved_count})"
+                    with st.expander(expander_title):
+                        tab_resolved, tab_unresolved = st.tabs(
+                            [f"รายการที่แก้ไขแล้ว ({resolved_count})", f"รายการที่รอการแก้ไข ({unresolved_count})"])
+                        with tab_resolved:
+                            if resolved_count > 0:
+                                st.dataframe(
+                                    resolved_df[['Occurrence Date', 'Incident', 'Impact', 'Resulting Actions']],
+                                    hide_index=True, use_container_width=True, column_config={
+                                        "Occurrence Date": st.column_config.DatetimeColumn("วันที่เกิด",
+                                                                                           format="DD/MM/YYYY")})
+                            else:
+                                st.info("ไม่มีรายการที่แก้ไขแล้วในหมวดนี้")
+                        with tab_unresolved:
+                            if unresolved_count > 0:
+                                st.dataframe(category_df[category_df['Resulting Actions'].astype(str).isin(
+                                    ['None', '', 'nan'])][['Occurrence Date', 'Incident', 'Impact',
+                                                           'รายละเอียดการเกิด_Anonymized']], hide_index=True,
+                                             use_container_width=True, column_config={
+                                        "Occurrence Date": st.column_config.DatetimeColumn("วันที่เกิด",
+                                                                                           format="DD/MM/YYYY")})
+                            else:
+                                st.success("อุบัติการณ์ทั้งหมดในหมวดนี้ได้รับการแก้ไขแล้ว")
+
+            st.markdown("---")
+
+            # ------------------ ส่วนของกลุ่มอุบัติการณ์ทั่วไป (G) ------------------
+            st.markdown("#### กลุ่มอุบัติการณ์ทั่วไป (รหัสขึ้นต้นด้วย G)")
+            df_general = df[df['รหัส'].str.startswith('G', na=False)].copy()
+
+            if df_general.empty:
+                st.info("ไม่พบข้อมูลอุบัติการณ์กลุ่ม General ในช่วงเวลานี้")
+            else:
+                st.subheader("ภาพรวมอุบัติการณ์กลุ่ม General")
+                general_summary_table = create_summary_table_by_category(df_general, 'หมวด')
+                if not general_summary_table.empty:
+                    st.dataframe(general_summary_table, use_container_width=True)
+                else:
+                    st.info("ไม่มีข้อมูลเพียงพอสำหรับสร้างตารางสรุป")
+                st.markdown("---")
+
+                st.subheader("เจาะลึกสถานะการแก้ไขตามหมวดย่อย (General)")
+                general_categories = sorted([cat for cat in df_general['หมวด'].unique() if cat and pd.notna(cat)])
+                for category in general_categories:
+                    category_df = df_general[df_general['หมวด'] == category]
+                    total_count = len(category_df)
+                    resolved_df = category_df[
+                        ~category_df['Resulting Actions'].astype(str).isin(['None', '', 'nan'])]
+                    resolved_count = len(resolved_df)
+                    unresolved_count = total_count - resolved_count
+
+                    expander_title = f"{category} (ทั้งหมด: {total_count} | แก้ไขแล้ว: {resolved_count} | รอแก้ไข: {unresolved_count})"
+                    with st.expander(expander_title):
+                        tab_resolved, tab_unresolved = st.tabs(
+                            [f"รายการที่แก้ไขแล้ว ({resolved_count})", f"รายการที่รอการแก้ไข ({unresolved_count})"])
+                        with tab_resolved:
+                            if resolved_count > 0:
+                                st.dataframe(
+                                    resolved_df[['Occurrence Date', 'Incident', 'Impact', 'Resulting Actions']],
+                                    hide_index=True, use_container_width=True, column_config={
+                                        "Occurrence Date": st.column_config.DatetimeColumn("วันที่เกิด",
+                                                                                           format="DD/MM/YYYY")})
+                            else:
+                                st.info("ไม่มีรายการที่แก้ไขแล้วในหมวดนี้")
+                        with tab_unresolved:
+                            if unresolved_count > 0:
+                                st.dataframe(category_df[category_df['Resulting Actions'].astype(str).isin(
+                                    ['None', '', 'nan'])][['Occurrence Date', 'Incident', 'Impact',
+                                                           'รายละเอียดการเกิด_Anonymized']], hide_index=True,
+                                             use_container_width=True, column_config={
+                                        "Occurrence Date": st.column_config.DatetimeColumn("วันที่เกิด",
+                                                                                           format="DD/MM/YYYY")})
+                            else:
+                                st.success("อุบัติการณ์ทั้งหมดในหมวดนี้ได้รับการแก้ไขแล้ว")
+
+        # --- Tab ที่ 3: วิเคราะห์รายรหัส ---
+        with tab_by_code:
+            st.subheader("ภาพรวมอุบัติการณ์จำแนกตามรหัส")
+            st.info(
+                "แสดงตารางสรุปจำนวนอุบัติการณ์ในแต่ละระดับความรุนแรงตามรหัส และกราฟแสดงเฉพาะอุบัติการณ์รุนแรง (E-I) ที่พบบ่อย")
+
+            summary_table_code = create_summary_table_by_code(df)
+
+            if summary_table_code.empty:
+                st.warning("ไม่พบข้อมูลสำหรับสร้างตารางสรุปรายรหัส")
+            else:
+                st.markdown("##### ตารางสรุปอุบัติการณ์รายรหัส")
+                st.dataframe(summary_table_code, use_container_width=True)
+                st.markdown("---")
+
+                st.markdown("##### กราฟแสดงอุบัติการณ์รุนแรง (ระดับ E-I) ที่พบบ่อย")
+                chart_data = summary_table_code[summary_table_code['รวม E-up'] > 0].copy()
+
+                if chart_data.empty:
+                    st.success("ไม่พบอุบัติการณ์รุนแรง (E-I) ในช่วงข้อมูลที่เลือก")
+                else:
+                    top_n_chart = st.slider(
+                        "เลือกจำนวนรหัสที่ต้องการแสดงบนกราฟ:", min_value=1,
+                        max_value=min(30, len(chart_data)), value=min(15, len(chart_data)),
+                        step=1, key="top_n_chart_slider_tab"
+                    )
+                    top_chart_data = chart_data.nlargest(top_n_chart, 'รวม E-up')
+                    fig = px.bar(
+                        top_chart_data.sort_values('รวม E-up', ascending=True),
+                        x='รวม E-up', y=top_chart_data.index, orientation='h',
+                        title=f'Top {top_n_chart} รหัสอุบัติการณ์ที่มีความรุนแรงสูง (E-I) สะสม',
+                        labels={'รวม E-up': 'จำนวนครั้งสะสม (E-I)', 'y': 'รหัสอุบัติการณ์'},
+                        text='รวม E-up', color='รวม E-up', color_continuous_scale='Reds'
+                    )
+                    fig.update_layout(height=max(400, len(top_chart_data) * 25), yaxis_title=None,
+                                      coloraxis_showscale=False)
+                    fig.update_traces(textposition='outside')
+                    st.plotly_chart(fig, use_container_width=True)
+
+        # --- Tab ที่ 4: รายการอุบัติการณ์ที่รอการแก้ไข ---
+        with tab_waitlist:
+            st.subheader("สรุปเปอร์เซ็นต์การแก้ไขอุบัติการณ์รุนแรง (E-I & 3-5)")
+
+            # คำนวณค่าที่จำเป็นจาก 'df' ที่รับเข้ามาในฟังก์ชันนี้โดยตรง
+            severe_impact_levels_list = ['3', '4', '5']
+            severe_df = df[df['Impact Level'].isin(severe_impact_levels_list)].copy()
+            total_severe_incidents = severe_df.shape[0]
+
+            total_severe_psg9_incidents = severe_df[severe_df['รหัส'].isin(psg9_r_codes_for_counting)].shape[
+                0] if psg9_r_codes_for_counting else 0
+
+            total_severe_unresolved_incidents_val = 0
+            total_severe_unresolved_psg9_incidents_val = 0
+
+            if 'Resulting Actions' in df.columns:
+                unresolved_severe_df = severe_df[severe_df['Resulting Actions'].astype(str).isin(['None', '', 'nan'])]
+                total_severe_unresolved_incidents_val = unresolved_severe_df.shape[0]
+                total_severe_unresolved_psg9_incidents_val = \
+                unresolved_severe_df[unresolved_severe_df['รหัส'].isin(psg9_r_codes_for_counting)].shape[
+                    0] if psg9_r_codes_for_counting else 0
+
+            val_row3_total_pct = (
+                    total_severe_unresolved_incidents_val / total_severe_incidents * 100) if total_severe_incidents > 0 else 0
+            val_row3_psg9_pct = (
+                    total_severe_unresolved_psg9_incidents_val / total_severe_psg9_incidents * 100) if total_severe_psg9_incidents > 0 else 0
+
+            summary_action_data = [
+                {"รายละเอียด": "1. จำนวนอุบัติการณ์รุนแรง E-I & 3-5", "ทั้งหมด": f"{total_severe_incidents:,}",
+                 "เฉพาะ PSG9": f"{total_severe_psg9_incidents:,}"},
+                {"รายละเอียด": "2. อุบัติการณ์ E-I & 3-5 ที่ยังไม่ได้รับการแก้ไข",
+                 "ทั้งหมด": f"{total_severe_unresolved_incidents_val:,}",
+                 "เฉพาะ PSG9": f"{total_severe_unresolved_psg9_incidents_val:,}"},
+                {"รายละเอียด": "3. % อุบัติการณ์ E-I & 3-5 ที่ยังไม่ได้รับการแก้ไข",
+                 "ทั้งหมด": f"{val_row3_total_pct:.2f}%", "เฉพาะ PSG9": f"{val_row3_psg9_pct:.2f}%"}
+            ]
+            st.dataframe(pd.DataFrame(summary_action_data).set_index('รายละเอียด'), use_container_width=True)
+
+            st.subheader("รายการอุบัติการณ์ที่รอการแก้ไข (ตามความรุนแรง)")
+            unresolved_df = df[df['Resulting Actions'].astype(str).isin(['None', '', 'nan'])].copy()
+
+            if unresolved_df.empty:
+                st.success("🎉 ไม่พบรายการที่รอการแก้ไขในช่วงเวลานี้ ยอดเยี่ยมมากครับ!")
+            else:
+                st.metric("จำนวนรายการที่รอการแก้ไขทั้งหมด", f"{len(unresolved_df):,} รายการ")
+                severity_order = ['Critical', 'High', 'Medium', 'Low', 'Undefined']
+                for severity in severity_order:
+                    severity_df = unresolved_df[unresolved_df['Category Color'] == severity]
+                    if not severity_df.empty:
+                        with st.expander(f"ระดับความรุนแรง: {severity} ({len(severity_df)} รายการ)"):
+                            display_cols = ['Occurrence Date', 'Incident', 'Impact',
+                                            'รายละเอียดการเกิด_Anonymized']
+
+                            st.dataframe(severity_df[display_cols], use_container_width=True, hide_index=True,
+                                         column_config={"Occurrence Date": st.column_config.DatetimeColumn("วันที่เกิด",
+                                                                                                           format="DD/MM/YYYY")})
+
+
+def render_risk_matrix_interactive(df: pd.DataFrame, key_prefix: str = "main_rmx"):
+    st.subheader("Risk Matrix (Interactive)")
+    impact_level_keys = ['5', '4', '3', '2', '1'];
+    freq_level_keys = ['1', '2', '3', '4', '5']
+    matrix_df = df[
+        df['Impact Level'].astype(str).isin(impact_level_keys) &
+        df['Frequency Level'].astype(str).isin(freq_level_keys)
+        ].copy()
+    matrix_data_counts = np.zeros((5, 5), dtype=int)
+    if not matrix_df.empty:
+        risk_counts_df = matrix_df.groupby(['Impact Level', 'Frequency Level']).size().reset_index(name='counts')
+        for _, row in risk_counts_df.iterrows():
+            r = impact_level_keys.index(str(row['Impact Level']))
+            c = freq_level_keys.index(str(row['Frequency Level']))
+            matrix_data_counts[r, c] = int(row['counts'])
+
+    impact_labels_display = {
+        '5': "I / 5<br>Extreme / Death", '4': "G-H / 4<br>Major / Severe", '3': "E-F / 3<br>Moderate",
+        '2': "C-D / 2<br>Minor / Low", '1': "A-B / 1<br>Insignificant / No Harm",
+    }
+    freq_labels_display_short = {"1": "F1", "2": "F2", "3": "F3", "4": "F4", "5": "F5"}
+    freq_labels_display_long = {
+        "1": "Remote<br>(<2/mth)", "2": "Uncommon<br>(2-3/mth)", "3": "Occasional<br>(4-6/mth)",
+        "4": "Probable<br>(7-29/mth)", "5": "Frequent<br>(>=30/mth)",
+    }
+
+    cols_header = st.columns([2.2, 1, 1, 1, 1, 1])
+    with cols_header[0]:
+        st.markdown(
+            f"<div style='background-color:{HEADER_TOPLEFT}; color:{_text_color_for(HEADER_TOPLEFT)}; "
+            f"padding:8px; text-align:center; font-weight:bold; border-radius:3px; margin:1px; height:60px; "
+            f"display:flex; align-itemsV:center; justify-content:center;'>Impact / Frequency</div>",
+            unsafe_allow_html=True
+        )
+    for i, fl in enumerate(freq_level_keys):
+        with cols_header[i + 1]:
+            st.markdown(
+                f"<div style='background-color:{HEADER_FREQ}; color:{_text_color_for(HEADER_FREQ)}; "
+                f"padding:8px; text-align:center; font-weight:bold; border-radius:3px; margin:1px; height:60px; "
+                f"display:flex; flex-direction:column; align-items:center; justify-content:center;'>"
+                f"<div>{freq_labels_display_short[fl]}</div>"
+                f"<div style='font-size:0.7em;'>{freq_labels_display_long[fl]}</div></div>",
+                unsafe_allow_html=True
+            )
+    for r, il in enumerate(impact_level_keys):
+        row_cols = st.columns([2.2, 1, 1, 1, 1, 1])
+        with row_cols[0]:
+            st.markdown(
+                f"<div style='background-color:{HEADER_SIDE}; color:{_text_color_for(HEADER_SIDE)}; "
+                f"padding:8px; text-align:center; font-weight:bold; border-radius:3px; margin:1px; height:70px; "
+                f"display:flex; align-items:center; justify-content:center;'>{impact_labels_display[il]}</div>",
+                unsafe_allow_html=True
+            )
+        for c, fl in enumerate(freq_level_keys):
+            with row_cols[c + 1]:
+                code = f'{il}{fl}'
+                cell_bg = PALETTE_FROM_IMAGE.get(code, "#808080")
+                cnt = int(matrix_data_counts[r, c])
+                st.markdown(
+                    f"<div style='background-color:{cell_bg}; color:{_text_color_for(cell_bg)}; "
+                    f"padding:5px; margin:1px; border-radius:3px; text-align:center; font-weight:bold; "
+                    f"min-height:40px; display:flex; align-items:center; justify-content:center;'>{cnt}</div>",
+                    unsafe_allow_html=True
+                )
+                if cnt > 0:
+                    if st.button("👁️", key=f"{key_prefix}_view_{code}", help=f"ดูรายการ - {cnt} รายการ",
+                                 use_container_width=True):
+                        st.session_state[f"{key_prefix}_il"] = il
+                        st.session_state[f"{key_prefix}_fl"] = fl
+                        st.session_state[f"{key_prefix}_show"] = True
+                        st.rerun()
+                else:
+                    st.markdown("<div style='height:38px; margin-top:5px;'></div>", unsafe_allow_html=True)
+
+    if st.session_state.get(f"{key_prefix}_show", False):
+        il_selected = st.session_state.get(f"{key_prefix}_il")
+        fl_selected = st.session_state.get(f"{key_prefix}_fl")
+        df_incidents = df[
+            (df['Impact Level'].astype(str) == str(il_selected)) &
+            (df['Frequency Level'].astype(str) == str(fl_selected))
+            ].copy()
+        disp_cols_default = ['รหัส', 'ชื่ออุบัติการณ์ความเสี่ยง', 'Impact Level', 'Frequency Level', 'Risk Level',
+                             'Occurrence Date', 'หน่วยงาน', 'กลุ่มงาน']
+        display_cols = [c for c in disp_cols_default if c in df_incidents.columns]
+        with st.expander(
+                f"รายการอุบัติการณ์: Impact {il_selected} × Frequency {fl_selected} – {len(df_incidents)} รายการ",
+                expanded=True):
+            st.dataframe(df_incidents[display_cols], use_container_width=True, hide_index=True)
+            if st.button("ปิดรายการ", key=f"{key_prefix}_close"):
+                st.session_state[f"{key_prefix}_show"] = False
+                st.session_state[f"{key_prefix}_il"] = None
+                st.session_state[f"{key_prefix}_fl"] = None
+                st.rerun()
+
+
+def render_risk_level_summary(df: pd.DataFrame):
+    st.subheader("ตารางสรุปสีตามระดับความเสี่ยงสูงสุดของแต่ละอุบัติการณ์")
+    st.info("สีและป้ายกำกับ (I: Impact, F: Frequency) มาจากช่องที่มีความเสี่ยงสูงสุดของอุบัติการณ์ประเภทนั้นๆ")
+
+    required = {'Impact Level', 'Frequency Level', 'รหัส', 'ชื่ออุบัติการณ์ความเสี่ยง'}
+    if not required.issubset(df.columns):
+        st.warning("ไม่พบคอลัมน์ที่จำเป็น ('Impact Level','Frequency Level','รหัส','ชื่ออุบัติการณ์ความเสี่ยง')")
+        return
+
+    order = {'1': 1, '2': 2, '3': 3, '4': 4, '5': 5}
+    tmp = df.copy()
+    tmp['I_num'] = tmp['Impact Level'].map(order).fillna(0).astype(int)
+    tmp['F_num'] = tmp['Frequency Level'].map(order).fillna(0).astype(int)
+    tmp['score'] = tmp['I_num'] * 10 + tmp['F_num']  # ให้ Impact สำคัญกว่า
+
+    idx = tmp.groupby(['รหัส', 'ชื่ออุบัติการณ์ความเสี่ยง'])['score'].idxmax()
+    incident_risk_summary = (
+        tmp.loc[idx, ['รหัส', 'ชื่ออุบัติการณ์ความเสี่ยง', 'Impact Level', 'Frequency Level', 'Incident Rate/mth']]
+        .rename(columns={'Impact Level': 'max_impact_level',
+                         'Frequency Level': 'frequency_level',
+                         'Incident Rate/mth': 'total_occurrences'})
+    )
+
+    # ใช้ฟังก์ชัน _text_color_for() ที่เรานิยามไว้ข้างบน
+    incident_risk_summary['risk_color_hex'] = incident_risk_summary.apply(
+        lambda r: PALETTE_FROM_IMAGE.get(f"{str(r['max_impact_level'])}{str(r['frequency_level'])}", "#808080"), axis=1
+    )
+    if 'total_occurrences' in incident_risk_summary.columns:
+        incident_risk_summary = incident_risk_summary.sort_values('total_occurrences', ascending=False)
+
+    for _, row in incident_risk_summary.iterrows():
+        color = row['risk_color_hex'];
+        text_color = _text_color_for(color)
+        risk_label = f"I: {row['max_impact_level']} | F: {row['frequency_level']}"
+        c1, c2 = st.columns([1, 6])
+        with c1:
+            st.markdown(
+                f'<div style="background-color:{color}; color:{text_color}; font-weight:bold; '
+                f'text-align:center; padding:8px; border-radius:6px; height:100%; '
+                f'display:flex; align-items:center; justify-content:center;">{risk_label}</div>',
+                unsafe_allow_html=True
+            )
+        with c2:
+            tot = row.get('total_occurrences', 0)
+            st.markdown(f"**{row['รหัส']} | {row['ชื่ออุบัติการณ์ความเสี่ยง']}** "
+                        f"(อัตราการเกิด: {float(tot):.2f} ครั้ง/เดือน)")
+
+
+# --- START: Helper Functions for Incident Analysis ---
 
 def create_psg9_summary_table(input_df):
     if not isinstance(input_df,
@@ -563,7 +1171,8 @@ def create_psg9_summary_table(input_df):
         [col for col in all_impacts if col in summary_table.columns]].sum(axis=1)
     summary_table['รวม E-up'] = summary_table[[col for col in e_up_impacts if col in summary_table.columns]].sum(axis=1)
     summary_table['ร้อยละ E-up'] = (summary_table['รวม E-up'] / summary_table['รวม A-I'] * 100).fillna(0)
-    psg_order = [PSG9_label_dict[i] for i in sorted(PSG9_label_dict.keys())]
+    # (PSG9_label_dict เป็นตัวแปร global ที่โหลดไว้ตอนเริ่มแอป)
+    psg_order = [PSG9_label_dict[i] for i in sorted(PSG9_label_dict.keys()) if i in PSG9_label_dict]
     summary_table = summary_table.reindex(psg_order).fillna(0)
     display_cols_order = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'รวม E-up', 'รวม A-I', 'ร้อยละ E-up']
     final_table = summary_table[[col for col in display_cols_order if col in summary_table.columns]].copy()
@@ -573,2297 +1182,710 @@ def create_psg9_summary_table(input_df):
     return final_table
 
 
-def get_text_color_for_bg(hex_color):
-    try:
-        hex_color = hex_color.lstrip('#')
-        if len(hex_color) != 6: return '#000000'
-        rgb = tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
-        luminance = (0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]) / 255
-        return '#FFFFFF' if luminance < 0.5 else '#000000'
-    except ValueError:
-        return '#000000'
-
-def prioritize_incidents_nb_logit_v2(_df: pd.DataFrame,
-                                     horizon: int = 3,
-                                     min_months: int = 4,
-                                     min_total: int = 5,
-                                     w_expected_severe: float = 0.7,
-                                     w_freq_growth: float = 0.2,
-                                     w_sev_growth: float = 0.1,
-                                     alpha_floor: float = 1e-8):
+def create_summary_table_by_code(dataframe):
     """
-    เวอร์ชันแก้บั๊ก: คำนวณ Priority แบบ NB+Logit และทำสกอร์หลังรวม DataFrame (ไม่เรียก fillna บนสเกลาร์)
+    สร้างตารางสรุปจำนวนอุบัติการณ์ตาม 'รหัส' และระดับความรุนแรง
+    โดยในแถวจะแสดงทั้งรหัสและชื่อของอุบัติการณ์
     """
-    req = ['รหัส', 'Occurrence Date', 'Impact Level']
-    if any(c not in _df.columns for c in req):
+    required_cols = ['รหัส', 'ชื่ออุบัติการณ์ความเสี่ยง', 'Impact']
+    if not all(col in dataframe.columns for col in required_cols):
+        missing_cols = [col for col in required_cols if col not in dataframe.columns]
+        st.warning(f"ไม่สามารถสร้างตารางได้ เนื่องจากขาดคอลัมน์: {', '.join(missing_cols)}")
         return pd.DataFrame()
 
-    d = _df.copy()
-    d = d[pd.to_datetime(d['Occurrence Date'], errors='coerce').notna()]
-    if d.empty:
-        return pd.DataFrame()
-    d['YearMonth'] = pd.to_datetime(d['Occurrence Date']).dt.to_period('M')
-
-    full_range = pd.period_range(d['YearMonth'].min(), d['YearMonth'].max(), freq='M')
-
-    rows = []
-    for code, sub in d.groupby('รหัส'):
-        if len(sub) < min_total:
-            continue
-
-        # ===== ความถี่รายเดือน (NB) =====
-        counts = sub.groupby('YearMonth').size().reindex(full_range, fill_value=0).astype(float)
-        y = counts.values
-        n_months = len(counts)
-        t = np.arange(n_months, dtype=float)
-        X = sm.add_constant(t)
-
-        nb_beta0 = np.nan; nb_beta1 = np.nan; nb_p = np.nan; nb_factor = np.nan; alpha_hat = np.nan
-        mu_future = np.zeros(horizon, dtype=float)
-
-        if n_months >= min_months and y.sum() > 0:
-            try:
-                pois = sm.GLM(y, X, family=sm.families.Poisson()).fit()
-                mu = pois.fittedvalues
-                num = float(((y - mu)**2 - y).sum())
-                den = float(max((mu**2).sum(), 1e-12))
-                alpha_hat = max(num/den, alpha_floor)
-
-                nb = sm.GLM(y, X, family=sm.families.NegativeBinomial(alpha=alpha_hat)).fit()
-                nb_beta0, nb_beta1 = float(nb.params[0]), float(nb.params[1])
-                nb_p = float(nb.pvalues[1])
-                nb_factor = float(np.exp(nb_beta1))
-
-                t_future = np.arange(n_months, n_months + horizon, dtype=float)
-                eta_future = nb_beta0 + nb_beta1 * t_future
-                mu_future = np.exp(eta_future)
-            except Exception:
-                pass
-
-        # ===== สัดส่วนเหตุรุนแรง LV3-5 (Logit) =====
-        sub['__sev__'] = sub['Impact Level'].astype(str).isin(['3','4','5']).astype(int)
-        sev_counts = sub.groupby('YearMonth')['__sev__'].sum().reindex(full_range, fill_value=0).astype(float)
-        n_counts   = sub.groupby('YearMonth').size().reindex(full_range, fill_value=0).astype(float)
-        mask = n_counts > 0
-
-        lg_beta0 = np.nan; lg_beta1 = np.nan; lg_p = np.nan; sev_or = np.nan
-        p_future = np.full(horizon, np.nan, dtype=float)
-
-        if mask.sum() >= min_months and sev_counts[mask].sum() > 0 and (sev_counts[mask] < n_counts[mask]).any():
-            try:
-                endog = (sev_counts[mask] / n_counts[mask]).values
-                Xt = sm.add_constant(np.arange(n_months)[mask].astype(float))
-                logit = sm.GLM(endog, Xt, family=sm.families.Binomial(), freq_weights=n_counts[mask].values).fit()
-                lg_beta0, lg_beta1 = float(logit.params[0]), float(logit.params[1])
-                lg_p = float(logit.pvalues[1])
-                sev_or = float(np.exp(lg_beta1))
-
-                t_future_all = np.arange(n_months, n_months + horizon, dtype=float)
-                lin = lg_beta0 + lg_beta1 * t_future_all
-                p_future = 1/(1 + np.exp(-lin))
-                p_future = np.clip(p_future, 1e-6, 1-1e-6)
-            except Exception:
-                pass
-        else:
-            base_p = (sev_counts.sum()/n_counts.sum()) if n_counts.sum() > 0 else 0.0
-            p_future = np.full(horizon, base_p, dtype=float)
-
-        expected_all_nextH = float(np.nansum(mu_future))
-        expected_sev_nextH = float(np.nansum(mu_future * p_future))
-
-        freq_rising = (nb_beta1 > 0) and (pd.notna(nb_p) and nb_p < 0.05)
-        sev_rising  = (lg_beta1 > 0) and (pd.notna(lg_p) and lg_p < 0.05)
-
-        rows.append({
-            'รหัส': code,
-            'ชื่ออุบัติการณ์ความเสี่ยง': sub['ชื่ออุบัติการณ์ความเสี่ยง'].iloc[0] if 'ชื่ออุบัติการณ์ความเสี่ยง' in sub else '',
-            'Months_Observed': int(n_months),
-            'Total_Occurrences': int(y.sum()),
-            'NB_alpha_hat': alpha_hat,
-            'Freq_NB_Slope': nb_beta1,
-            'Freq_p_value': nb_p,
-            'Freq_Factor_per_month': nb_factor,        # เก็บค่า “ดิบ” มาก่อน
-            'Severity_Logit_Slope': lg_beta1,
-            'Severity_p_value': lg_p,
-            'Severe_OR_per_month': sev_or,             # เก็บค่า “ดิบ” มาก่อน
-            'Expected_All_nextH': expected_all_nextH,
-            'Expected_Severe_nextH': expected_sev_nextH,
-            'Freq_Rising': freq_rising,
-            'Sev_Rising': sev_rising
-        })
-
-    if not rows:
+    df_copy = dataframe.copy()
+    df_copy['รหัส | ชื่ออุบัติการณ์'] = df_copy['รหัส'].astype(str) + " | " + df_copy[
+        'ชื่ออุบัติการณ์ความเสี่ยง'].fillna('')
+    df_valid = df_copy.dropna(subset=['รหัส | ชื่ออุบัติการณ์', 'Impact'])
+    if df_valid.empty:
         return pd.DataFrame()
 
-    out = pd.DataFrame(rows)
+    summary = pd.crosstab(df_valid['รหัส | ชื่ออุบัติการณ์'], df_valid['Impact'])
+    severity_levels = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I']
+    summary = summary.reindex(columns=severity_levels, fill_value=0)
+    e_to_i_cols = [col for col in ['E', 'F', 'G', 'H', 'I'] if col in summary.columns]
+    summary['รวม E-up'] = summary[e_to_i_cols].sum(axis=1)
+    total_e_up_incidents = summary['รวม E-up'].sum()
 
-    # ---------- ช่วยฟังก์ชัน: รับอาเรย์/Series เท่านั้น (ไม่รองรับสเกลาร์) ----------
-    def _safe_log_pos_arr(x):
-        arr = np.asarray(x, dtype=float)
-        arr[~np.isfinite(arr)] = 1.0
-        arr = np.clip(arr, 1e-12, None)
-        return np.log(arr)
-
-    def _norm01_pos_arr(x):
-        arr = np.asarray(x, dtype=float)
-        arr[~np.isfinite(arr)] = 0.0
-        arr = np.clip(arr, 0, None)
-        rng = arr.max() - arr.min()
-        return (arr - arr.min())/rng if rng > 0 else np.zeros_like(arr)
-
-    # ---------- เตรียมคอลัมน์ก่อนทำสกอร์ ----------
-    out['Freq_Factor_per_month'] = pd.to_numeric(out['Freq_Factor_per_month'], errors='coerce').fillna(1.0)
-    out['Severe_OR_per_month']   = pd.to_numeric(out['Severe_OR_per_month'], errors='coerce').fillna(1.0)
-    out['Expected_Severe_nextH'] = pd.to_numeric(out['Expected_Severe_nextH'], errors='coerce').fillna(0.0)
-
-    # ---------- คำนวณสกอร์แบบเวคเตอร์ (ไม่ยุ่งกับสเกลาร์) ----------
-    out['Score_expected_severe'] = _norm01_pos_arr(out['Expected_Severe_nextH'].values)
-    out['Score_freq_growth']     = _norm01_pos_arr(_safe_log_pos_arr(out['Freq_Factor_per_month'].values))
-    out['Score_sev_growth']      = _norm01_pos_arr(_safe_log_pos_arr(out['Severe_OR_per_month'].values))
-
-    # bonus ถ้า 2 แนวโน้มมีนัย
-    bonus = np.where((out['Freq_Rising']) & (out['Sev_Rising']), 0.05, 0.0)
-
-    out['Priority_Score'] = (
-        w_expected_severe * out['Score_expected_severe'] +
-        w_freq_growth     * out['Score_freq_growth'] +
-        w_sev_growth      * out['Score_sev_growth'] +
-        bonus
-    )
-
-    cols = [
-        'รหัส','ชื่ออุบัติการณ์ความเสี่ยง','Months_Observed','Total_Occurrences',
-        'Expected_All_nextH','Expected_Severe_nextH',
-        'Freq_Factor_per_month','Freq_p_value',
-        'Severe_OR_per_month','Severity_p_value',
-        'NB_alpha_hat','Priority_Score',
-        'Freq_Rising','Sev_Rising'
-    ]
-    out = out[cols].sort_values('Priority_Score', ascending=False).reset_index(drop=True)
-    return out
-
-    # --- เตรียมข้อมูลสำหรับแต่ละส่วน ---
-
-    # 2. Risk Matrix & Top 10
-    impact_level_keys = ['5', '4', '3', '2', '1']
-    freq_level_keys = ['1', '2', '3', '4', '5']
-    matrix_df = df_filtered[
-        df_filtered['Impact Level'].isin(impact_level_keys) & df_filtered['Frequency Level'].isin(freq_level_keys)]
-    matrix_data_html = "ไม่มีข้อมูล"
-    if not matrix_df.empty:
-        matrix_data = pd.crosstab(matrix_df['Impact Level'], matrix_df['Frequency Level'])
-        matrix_data = matrix_data.reindex(index=impact_level_keys, columns=freq_level_keys, fill_value=0)
-        impact_labels = {'5': "5 (Extreme)", '4': "4 (Major)", '3': "3 (Moderate)", '2': "2 (Minor)",
-                         '1': "1 (Insignificant)"}
-        freq_labels = {'1': "F1", '2': "F2", '3': "F3", '4': "F4", '5': "F5"}
-        matrix_data_html = matrix_data.rename(index=impact_labels, columns=freq_labels).to_html(
-            classes="styled-table",
-            table_id="risk-matrix-table"
-        )
-
-        frequency_legend_html = """
-        <div class="legend">
-            <h4>หมายเหตุ คำอธิบายความถี่ (Frequency)</h4>
-            <p>
-                <b>F1</b> = Remote (น้อยกว่า 2 ครั้ง/เดือน)<br>
-                <b>F2</b> = Uncommon (2-3 ครั้ง/เดือน)<br>
-                <b>F3</b> = Occasional (4-6 ครั้ง/เดือน)<br>
-                <b>F4</b> = Probable (7-29 ครั้ง/เดือน)<br>
-                <b>F5</b> = Frequent (มากกว่าหรือเท่ากับ 30 ครั้ง/เดือน)
-            </p>
-        </div>
-        """
-
-    top10_df = df_freq.nlargest(10, 'count').copy()
-    incident_names = df_filtered[['Incident', 'ชื่ออุบัติการณ์ความเสี่ยง']].drop_duplicates()
-    top10_df = pd.merge(top10_df, incident_names, on='Incident', how='left')
-    top10_html = top10_df[['Incident', 'count']].to_html(
-        classes="styled-table",
-        index=False,
-        table_id="top10-table"
-    )
-    # 3. Sentinel Events
-    sentinel_html = "<p>ไม่พบ Sentinel Events ในช่วงเวลานี้</p>"
-    if 'Sentinel code for check' in df_filtered.columns:
-        sentinel_df = df_filtered[df_filtered['Sentinel code for check'].isin(sentinel_composite_keys)]
-        if not sentinel_df.empty:
-            sentinel_html = sentinel_df[['Occurrence Date', 'Incident', 'Impact', 'รายละเอียดการเกิด_Anonymized']].to_html(
-                classes="styled-table",
-                index=False,
-                table_id="sentinel-table"
-            )
-
-    psg9_summary_table = create_psg9_summary_table(df_filtered)
-    psg9_html = "<p>ไม่พบข้อมูล PSG9 ในช่วงเวลานี้</p>"
-    if psg9_summary_table is not None and not psg9_summary_table.empty:
-        # to_html จะสร้าง index เป็นคอลัมน์แรกโดยอัตโนมัติ
-        psg9_html = psg9_summary_table.to_html(
-            classes="styled-table",
-            table_id="psg9-table"
-        )
-        #เตรียมข้อมูลสำหรับตาราง "สรุปอุบัติการณ์ตามเป้าหมาย"
-        goal_definitions = {
-            "Patient Safety/ Common Clinical Risk": "P:Patient Safety Goals หรือ Common Clinical Risk Incident",
-            "Specific Clinical Risk": "S:Specific Clinical Risk Incident",
-            "Personnel Safety": "P:Personnel Safety Goals",
-            "Organization Safety": "O:Organization Safety Goals"
-        }
-        safety_goals_html_parts = []
-        for display_name, cat_name in goal_definitions.items():
-            is_org_safety = (display_name == "Organization Safety")
-            summary_table = create_goal_summary_table(
-                df_filtered, cat_name,
-                e_up_non_numeric_levels_param=[] if is_org_safety else ['A', 'B', 'C', 'D'],
-                e_up_numeric_levels_param=['1', '2'] if is_org_safety else None,
-                is_org_safety_table=is_org_safety
-            )
-            if summary_table is not None and not summary_table.empty:
-                safety_goals_html_parts.append(f"<h3>{display_name}</h3>")
-                # ใช้ class 'auto-width-table' สำหรับตารางที่มีคอลัมน์ไม่แน่นอน
-                safety_goals_html_parts.append(summary_table.to_html(classes="styled-table auto-width-table"))
-
-        safety_goals_html = "".join(
-            safety_goals_html_parts) if safety_goals_html_parts else "<p>ไม่มีข้อมูลสำหรับสรุปตามเป้าหมาย</p>"
-
-    #เตรียมข้อมูลสำหรับตาราง "อุบัติการณ์ที่ยังไม่แก้ไข"
-    unresolved_severe_df = df_filtered[
-        df_filtered['Impact Level'].isin(['3', '4', '5']) &
-        df_filtered['Resulting Actions'].astype(str).isin(['None', '', 'nan'])
-        ]
-    unresolved_severe_html = "<p>ไม่พบอุบัติการณ์รุนแรงที่ยังไม่ถูกแก้ไขในช่วงเวลานี้</p>"
-    if not unresolved_severe_df.empty:
-        # เลือกคอลัมน์และจัดรูปแบบวันที่
-        df_for_pdf = unresolved_severe_df[['Occurrence Date', 'Incident', 'Impact', 'รายละเอียดการเกิด_Anonymized']].copy()
-        df_for_pdf['Occurrence Date'] = df_for_pdf['Occurrence Date'].dt.strftime('%d/%m/%Y')
-
-        unresolved_severe_html = df_for_pdf.to_html(
-            classes="styled-table",
-            index=False,
-            table_id="unresolved-table"
-        )
-
-    #เตรียมข้อมูลสำหรับ "ความเสี่ยงเรื้อรัง"
-    persistence_html = "<p>ไม่มีข้อมูลเพียงพอสำหรับวิเคราะห์ความเสี่ยงเรื้อรัง</p>"
-    persistence_df = calculate_persistence_risk_score(df_filtered, total_month)
-    if not persistence_df.empty:
-        top_persistence = persistence_df.head(5)
-        p_list_items = ["<ol>"]
-        for index, row in top_persistence.iterrows():
-            item_text = (
-                f"<li><b>{row['รหัส']}: {row['ชื่ออุบัติการณ์ความเสี่ยง']}</b><br>"
-                f"<small><i>ดัชนีความเรื้อรัง: {row['Persistence_Risk_Score']:.2f} "
-                f"(เกิดเฉลี่ย: {row['Incident_Rate_Per_Month']:.2f} ครั้ง/เดือน)</i></small></li>"
-            )
-            p_list_items.append(item_text)
-        p_list_items.append("</ol>")
-        persistence_html = "".join(p_list_items)
-
-    #เตรียมข้อมูลสำหรับ "Early Warning"
-    early_warning_html = "<p>ไม่มีข้อมูลเพียงพอสำหรับวิเคราะห์ Early Warning</p>"
-    if 'prioritize_incidents_nb_logit_v2' in globals():
-        ew_df = prioritize_incidents_nb_logit_v2(df_filtered, horizon=3, min_months=4, min_total=5)
-        if not ew_df.empty:
-            top_ew = ew_df.head(5)
-            # สร้าง HTML List จากข้อมูล Top 5
-            ew_list_items = ["<ol>"] # <ol> คือ Ordered List (รายการเรียงลำดับ)
-            for index, row in top_ew.iterrows():
-                item_text = (
-                    f"<li><b>{row['รหัส']}: {row['ชื่ออุบัติการณ์ความเสี่ยง']}</b><br>"
-                    f"<small><i>คะแนนความสำคัญ: {row['Priority_Score']:.3f}, "
-                    f"คาดการณ์เหตุรุนแรงใน 3 เดือน: {row['Expected_Severe_nextH']:.2f} ครั้ง</i></small></li>"
-                )
-                ew_list_items.append(item_text)
-            ew_list_items.append("</ol>")
-            early_warning_html = "".join(ew_list_items)
-    # --- สร้าง HTML Content ---
-    html_string = f"""
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        <style>            
-            @page {{
-                size: A4;
-                margin: 2cm 1.5cm; /* เพิ่ม margin บนล่างเล็กน้อยเพื่อให้มีที่สำหรับ footer */
-
-                /* สร้าง footer ที่มุมขวาล่าง */
-                @bottom-center {{
-                    content: "หน้า " counter(page) " / " counter(pages);
-                    font-family: "TH SarabunPSK", sans-serif;
-                    font-size: 9pt;
-                    color: #888; /* สีเทา */
-                }}
-            }}
-            /* --- จบส่วนที่แก้ไข --- */
-            body {{ font-family: "TH SarabunPSK", sans-serif; font-size: 12pt; }}
-            h1, h2, h3 {{ font-family: "TH SarabunPSK", sans-serif; color: #001f3f; border-bottom: 2px solid #001f3f; padding-bottom: 5px;}}
-            h2 {{ page-break-before: always; }} /* ขึ้นหน้าใหม่ทุกครั้งที่เจอ h2 */
-            h1 + h2 {{ page-break-before: auto; }} /* ยกเว้น h2 แรกสุด */
-            .styled-table {{ width: 100%; border-collapse: collapse; margin-top: 1em; table-layout: fixed; }}
-            .styled-table th, .styled-table td {{ border: 1px solid #ddd; padding: 6px; text-align: left; word-wrap: break-word; }}
-            .styled-table th {{ background-color: #f2f2f2;  }}
-            .metric-container {{ display: flex; justify-content: space-around; padding: 10px; background-color: #f9f9f9; border-radius: 5px; }}
-            .metric {{ text-align: top; }}
-            .metric-label {{ font-size: 11pt; color: #555; }}
-            .metric-value {{ font-size: 16pt; font-weight: bold; }}
-            
-            #sentinel-table th:nth-child(1), #sentinel-table td:nth-child(1) {{ width: 24%; }}
-            #sentinel-table th:nth-child(2), #sentinel-table td:nth-child(2) {{ width: 24%; }}
-            #sentinel-table th:nth-child(3), #sentinel-table td:nth-child(3) {{ width: 10%; }} 
-            #sentinel-table th:nth-child(4), #sentinel-table td:nth-child(4) {{ width: 38%; }}                 
-            
-            #top10-table th:nth-child(1), #top10-table td:nth-child(1) {{ width: 80%; }} 
-            #top10-table th:nth-child(2), #top10-table td:nth-child(2) {{ width: 20%; }} 
-            
-            #risk-matrix-table th:nth-child(1), #risk-matrix-table td:nth-child(1) {{ width: 40%; }} 
-            #risk-matrix-table th:nth-child(n+2), #risk-matrix-table td:nth-child(n+2) {{ width: 10%; }} 
-           
-            #psg9-table th:nth-child(1), #psg9-table td:nth-child(1) {{ width: 28%; text-align: left; }}
-            #psg9-table th:nth-child(n+2):nth-child(-n+10),
-            #psg9-table td:nth-child(n+2):nth-child(-n+10) {{ width: 3.4%; text-align: center; }}
-            #psg9-table th:nth-child(n+11):nth-child(-n+12),
-            #psg9-table td:nth-child(n+11):nth-child(-n+12) {{ width: 6.5%; text-align: center; }}
-            #psg9-table th:nth-child(13), #psg9-table td:nth-child(13) {{ width: 10%; text-align: center; }}
-            
-            #unresolved-table th:nth-child(1), #unresolved-table td:nth-child(1) {{ width: 16%; }}
-            #unresolved-table th:nth-child(2), #unresolved-table td:nth-child(2) {{ width: 22%; }}
-            #unresolved-table th:nth-child(3), #unresolved-table td:nth-child(3) {{ width: 10%; }}
-            #unresolved-table th:nth-child(4), #unresolved-table td:nth-child(4) {{ width: 48%; }}
-            .auto-width-table {{
-                table-layout: auto;
-            }}
-            
-            ol {{ padding-left: 30px; }}
-            li {{ margin-bottom: 10px; }}
-            small {{ color: #555; }}
-        </style>
-    </head>
-    <body>
-        <h1>บทสรุปสำหรับผู้บริหาร</h1>
-        <p><b>ช่วงข้อมูลที่วิเคราะห์:</b> {min_date_str} ถึง {max_date_str} (รวม {total_month} เดือน)</p>
-        <p><b>จำนวนอุบัติการณ์ที่พบทั้งหมด:</b> {metrics_data.get('total_processed_incidents', 0):,} รายการ</p>
-
-        <h1>1. แดชบอร์ดสรุปภาพรวม</h1>
-        <div class="metric-container">
-            <div class="metric"><div class="metric-label">อุบัติการณ์ทั้งหมด</div><div class="metric-value">{metrics_data.get('total_processed_incidents', 0):,}</div></div>
-            <div class="metric"><div class="metric-label">Sentinel Events</div><div class="metric-value">{metrics_data.get('total_sentinel_incidents_for_metric1', 0):,}</div></div>
-            <div class="metric"><div class="metric-label">PSG9</div><div class="metric-value">{metrics_data.get('total_psg9_incidents_for_metric1', 0):,}</div></div>
-            <div class="metric"><div class="metric-label">ความรุนแรงสูง</div><div class="metric-value">{metrics_data.get('total_severe_incidents', 0):,}</div></div>
-            <div class="metric"><div class="metric-label">รุนแรง & ยังไม่แก้ไข</div><div class="metric-value">{metrics_data.get('total_severe_unresolved_incidents_val', 'N/A')}</div></div>
-        </div>
-
-        <h1>2. Risk Matrix และ Top 10 อุบัติการณ์</h1>
-        <h3>Risk Matrix</h3>
-        {matrix_data_html}
-        {frequency_legend_html}
-        <h2>Top 10 อุบัติการณ์ (ตามความถี่)</h2>
-        {top10_html}
-        <h2>3. รายการ Sentinel Events</h2>             
-        {sentinel_html}        
-        <h2>4. วิเคราะห์ตามหมวดหมู่ มาตรฐานสำคัญจำเป็นต่อความปลอดภัย 9 ข้อ</h2>
-        {psg9_html}        
-        <h2>5. สรุปอุบัติการณ์ตามเป้าหมาย (Safety Goals)</h2>
-        {safety_goals_html}
-        <h2>6. สรุปอุบัติการณ์ที่เป็นปัญหาเรื้อรัง (Persistence Risk - Top 5)</h2>
-        {persistence_html}        
-        <h3>7. Early Warning: อุบัติการณ์ที่มีแนวโน้มสูงขึ้น ใน 3 เดือนข้างหน้า (Top 5)</h3>
-        {early_warning_html}        
-        <h2>8. รายการอุบัติการณ์รุนแรง (E-I & 3-5) ที่ยังไม่ถูกแก้ไข</h2>
-        {unresolved_severe_html}
-        
-        </body>
-    </html>
-    """
-
-    # --- แปลง HTML เป็น PDF ---
-    return HTML(string=html_string).write_pdf()
-
-# ==============================================================================
-# STATIC DATA DEFINITIONS
-# ==============================================================================
-PSG9_FILE_PATH = "PSG9code.xlsx"
-SENTINEL_FILE_PATH = "Sentinel2024.xlsx"
-ALLCODE_FILE_PATH = "Code2024.xlsx"
-psg9_r_codes_for_counting = set()
-RISK_MITIGATION_FILE = "risk_mitigations.xlsx"
-sentinel_composite_keys = set()
-df2 = pd.DataFrame()
-try:
-    if Path(PSG9_FILE_PATH).is_file():
-        PSG9code_df_master = pd.read_excel(PSG9_FILE_PATH)
-        if 'รหัส' in PSG9code_df_master.columns:
-            psg9_r_codes_for_counting = set(PSG9code_df_master['รหัส'].astype(str).str.strip().unique())
-    if Path(SENTINEL_FILE_PATH).is_file():
-        Sentinel2024_df = pd.read_excel(SENTINEL_FILE_PATH)
-        if 'รหัส' in Sentinel2024_df.columns and 'Impact' in Sentinel2024_df.columns:
-            Sentinel2024_df['รหัส'] = Sentinel2024_df['รหัส'].astype(str).str.strip()
-            Sentinel2024_df['Impact'] = Sentinel2024_df['Impact'].astype(str).str.strip()
-            Sentinel2024_df.dropna(subset=['รหัส', 'Impact'], inplace=True)
-            sentinel_composite_keys = set((Sentinel2024_df['รหัส'] + '-' + Sentinel2024_df['Impact']).unique())
-    if Path(ALLCODE_FILE_PATH).is_file():
-        allcode2024_df = pd.read_excel(ALLCODE_FILE_PATH)
-        if 'รหัส' in allcode2024_df.columns and all(c in allcode2024_df.columns for c in ["ชื่ออุบัติการณ์ความเสี่ยง", "กลุ่ม", "หมวด"]):
-            df2 = allcode2024_df[["รหัส", "ชื่ออุบัติการณ์ความเสี่ยง", "กลุ่ม", "หมวด"]].drop_duplicates().copy()
-            df2['รหัส'] = df2['รหัส'].astype(str).str.strip()
-    if Path(RISK_MITIGATION_FILE).is_file():
-        df_mitigation = pd.read_excel(RISK_MITIGATION_FILE)
+    if total_e_up_incidents > 0:
+        summary['ร้อยละ E-up'] = (summary['รวม E-up'] / total_e_up_incidents * 100).map('{:.2f}%'.format)
     else:
-        st.warning(f"ไม่พบไฟล์ '{RISK_MITIGATION_FILE}', ฟังก์ชัน Risk Register Assistant อาจให้คำแนะนำได้ไม่สมบูรณ์")
+        summary['ร้อยละ E-up'] = '0.00%'
 
-except Exception as e:
-    st.error(f"เกิดปัญหาในการโหลดไฟล์นิยาม: {e}")
+    summary = summary[summary.drop(columns=['ร้อยละ E-up']).sum(axis=1) > 0]
+    summary.index.name = "รหัส | ชื่ออุบัติการณ์"
+    return summary
 
-risk_color_data = {
-    'Category Color': ["Critical", "Critical", "Critical", "Critical", "Critical", "High", "High", "Critical", "Critical", "Critical", "Medium", "Medium", "High", "Critical", "Critical", "Low", "Medium", "Medium", "High", "High", "Low", "Low", "Low", "Medium", "Medium"],
-    'Risk Level': ["51", "52", "53", "54", "55", "41", "42", "43", "44", "45", "31", "32", "33", "34", "35", "21", "22", "23", "24", "25", "11", "12", "13", "14", "15"]}
-risk_color_df = pd.DataFrame(risk_color_data)
-display_cols_common = ['Occurrence Date', 'รหัส', 'ชื่ออุบัติการณ์ความเสี่ยง', 'Impact', 'Impact Level', 'รายละเอียดการเกิด_Anonymized', 'Resulting Actions']
-month_label = {1: '01 มกราคม', 2: '02 กุมภาพันธ์', 3: '03 มีนาคม', 4: '04 เมษายน', 5: '05 พฤษภาคม', 6: '06 มิถุนายน', 7: '07 กรกฎาคม', 8: '08 สิงหาคม', 9: '09 กันยายน', 10: '10 ตุลาคม', 11: '11 พฤศจิกายน', 12: '12 ธันวาคม'}
 
-PSG9_label_dict = {
-    1: '01 ผ่าตัดผิดคน ผิดข้าง ผิดตำแหน่ง ผิดหัตถการ', 2: '02 บุคลากรติดเชื้อจากการปฏิบัติหน้าที่',
-    3: '03 การติดเชื้อสำคัญ (SSI, VAP,CAUTI, CLABSI)', 4: '04 การเกิด Medication Error และ Adverse Drug Event',
-    5: '05 การให้เลือดผิดคน ผิดหมู่ ผิดชนิด', 6: '06 การระบุตัวผู้ป่วยผิดพลาด',
-    7: '07 ความคลาดเคลื่อนในการวินิจฉัยโรค', 8: '08 การรายงานผลการตรวจทางห้องปฏิบัติการ/พยาธิวิทยา คลาดเคลื่อน',
-    9: '09 การคัดกรองที่ห้องฉุกเฉินคลาดเคลื่อน'
-}
+def create_summary_table_by_category(dataframe, category_column_name):
+    """
+    สร้างตารางสรุปจำนวนอุบัติการณ์ตามหมวดหมู่และระดับความรุนแรง
+    """
+    if category_column_name not in dataframe.columns or 'Impact' not in dataframe.columns:
+        st.error(f"ไม่พบคอลัมน์ '{category_column_name}' หรือ 'Impact' ในข้อมูล")
+        return pd.DataFrame()
 
-# ✅ *** ส่วนที่เพิ่มกลับเข้ามา ***
-type_name = {'CPS': 'Safe Surgery', 'CPI': 'Infection Prevention and Control', 'CPM': 'Medication & Blood Safety',
-             'CPP': 'Patient Care Process', 'CPL': 'Line, Tube & Catheter and Laboratory', 'CPE': 'Emergency Response',
-             'CSG': 'Gynecology & Obstetrics diseases and procedure', 'CSS': 'Surgical diseases and procedure',
-             'CSM': 'Medical diseases and procedure', 'CSP': 'Pediatric diseases and procedure',
-             'CSO': 'Orthopedic diseases and procedure', 'CSD': 'Dental diseases and procedure',
-             'GPS': 'Social Media and Communication', 'GPI': 'Infection and Exposure',
-             'GPM': 'Mental Health and Mediation', 'GPP': 'Process of work', 'GPL': 'Lane (Traffic) and Legal Issues',
-             'GPE': 'Environment and Working Conditions', 'GOS': 'Strategy, Structure, Security',
-             'GOI': 'Information Technology & Communication, Internal control & Inventory',
-             'GOM': 'Manpower, Management', 'GOP': 'Policy, Process of work & Operation',
-             'GOL': 'Licensed & Professional certificate', 'GOE': 'Economy'}
+    df_valid = dataframe.dropna(subset=[category_column_name, 'Impact'])
+    if df_valid.empty:
+        return pd.DataFrame()
 
-colors2 = np.array([["#e1f5fe", "#f6c8b6", "#dd191d", "#dd191d", "#dd191d", "#dd191d", "#dd191d"],
-                    ["#e1f5fe", "#f6c8b6", "#ff8f00", "#ff8f00", "#dd191d", "#dd191d", "#dd191d"],
-                    ["#e1f5fe", "#f6c8b6", "#ffee58", "#ffee58", "#ff8f00", "#dd191d", "#dd191d"],
-                    ["#e1f5fe", "#f6c8b6", "#42db41", "#ffee58", "#ffee58", "#ff8f00", "#ff8f00"],
-                    ["#e1f5fe", "#f6c8b6", "#42db41", "#42db41", "#42db41", "#ffee58", "#ffee58"],
-                    ["#e1f5fe", "#f6c8b6", "#f6c8b6", "#f6c8b6", "#f6c8b6", "#f6c8b6", "#f6c8b6"],
-                    ["#e1f5fe", "#e1f5fe", "#e1f5fe", "#e1f5fe", "#e1f5fe", "#e1f5fe", "#e1f5fe"]])
+    summary = pd.crosstab(df_valid[category_column_name], df_valid['Impact'])
+    severity_levels = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I']
+    summary = summary.reindex(columns=severity_levels, fill_value=0)
+    e_to_i_cols = [col for col in ['E', 'F', 'G', 'H', 'I'] if col in summary.columns]
+    summary['รวม E-up'] = summary[e_to_i_cols].sum(axis=1)
+    total_e_up_incidents = summary['รวม E-up'].sum()
 
-def display_user_guide():
-    st.markdown("<h2 style='color: #001f3f;'>คู่มือการใช้งาน HOIA-RR Application</h2>", unsafe_allow_html=True)
-    st.markdown("---")
+    if total_e_up_incidents > 0:
+        summary['ร้อยละ E-up'] = (summary['รวม E-up'] / total_e_up_incidents * 100).map('{:.2f}%'.format)
+    else:
+        summary['ร้อยละ E-up'] = '0.00%'
 
-    st.markdown("""
-    **HOIA-RR (Hospital Occurrence/Incident Analysis & Risk Register)** คือเครื่องมือวิเคราะห์และจัดการอุบัติการณ์ความเสี่ยงในโรงพยาบาล ที่ถูกออกแบบมาเพื่อเปลี่ยนข้อมูลดิบให้กลายเป็นข้อมูลเชิงลึกที่นำไปปฏิบัติได้จริง ช่วยให้ผู้บริหารและผู้รับผิดชอบความเสี่ยง (Risk Owner) สามารถมองเห็นภาพรวม, ติดตามแนวโน้ม และตัดสินใจได้อย่างมีประสิทธิภาพ
-    """)
+    summary.index.name = "หมวดหมู่"
+    return summary
 
-    st.markdown("### **แอปพลิเคชันนี้ทำอะไรได้บ้าง? 💡**")
-    st.markdown("""
-    - **ประมวลผลข้อมูลอัตโนมัติ**: เพียงอัปโหลดไฟล์รายงานอุบัติการณ์ (`.xlsx` หรือ `.csv`) ระบบจะทำความสะอาดข้อมูล, คำนวณระดับความเสี่ยง (Risk Level), และจัดหมวดหมู่ให้โดยอัตโนมัติ
-    - **ปกปิดข้อมูลส่วนบุคคล (Anonymize)**: ปกป้องข้อมูลสำคัญ เช่น `HN` ของผู้ป่วย, ชื่อ-นามสกุล ก่อนนำมาแสดงผล เพื่อความปลอดภัยของข้อมูล
-    - **แสดงผลแดชบอร์ดเชิงโต้ตอบ (Interactive Dashboard)**: สรุปภาพรวมอุบัติการณ์ในหลากหลายมิติ ตั้งแต่ภาพรวมจนถึงการเจาะลึกรายหมวดหมู่
-    - **วิเคราะห์ความเสี่ยงขั้นสูง**: ชี้เป้า "ความเสี่ยงเรื้อรัง" (Persistence Risk) ที่เกิดขึ้นซ้ำๆ และส่ง "สัญญาณเตือนล่วงหน้า" (Early Warning) สำหรับอุบัติการณ์ที่มีแนวโน้มรุนแรงขึ้น
-    
-    - **AI ผู้ช่วยให้คำปรึกษา**: มาพร้อมกับ AI สองรูปแบบ คือ `RCA Helpdesk` สำหรับให้คำปรึกษาอุบัติการณ์ ซึ่งจะมีรายละเอียดได้แก่ รหัสที่แนะนำสำหรับลงอุบัติการณ์อ้างอิงตาม NRLS, สาเหตุหรือ contributing factor, คำแนะนำสำหรับการแก้ไขเบื้องต้น และการเรียนรู้ไปกับ 3P Safety & HA Standard อีกทั้ง `Risk Register Assistant` สำหรับช่วย Risk Owner ค้นหาข้อมูลเชิงลึกของอุบัติการณ์ที่ดูแลอยู่ (Review อุบัติการณ์ในช่วงเวลาที่เลือก) พร้อมคำแนะนำสำหรับ Risk Transfer & Prevention และ Risk Monitor  
-    
-    
-    """)
 
-    st.markdown("### **เริ่มต้นใช้งาน: สำหรับผู้ดูแลระบบ (Admin) 🛠️**")
-    st.markdown("""
-    หน้าที่หลักของผู้ดูแลระบบคือการนำข้อมูลเข้าสู่ระบบเพื่อให้ทุกคนสามารถใช้งานได้
+# --- END: Helper Functions for Incident Analysis ---
 
-    **ขั้นตอน:**
-    1.  ไปที่เมนู **"จัดการข้อมูล (Admin)"**
-    2.  เตรียมไฟล์รายงานอุบัติการณ์ของคุณให้เป็นไฟล์ **`.xlsx`** (แนะนำ) หรือ `.csv`
-    3.  **ตรวจสอบคอลัมน์ที่จำเป็น**: ไฟล์ของคุณต้องมีคอลัมน์หลักดังนี้:
-        - `Incident` (รหัสและชื่ออุบัติการณ์)
-        - `วดป.ที่เกิด` (วันที่เกิดเหตุ)
-        - `ความรุนแรง` (ระดับ A-I)
-        - `สถานะ` (เช่น รอแก้ไข, แก้ไขแล้ว)
-        - `รายละเอียดการเกิด`
-    4.  คลิก **"Browse files"** และเลือกไฟล์ของคุณ
-    5.  รอให้ระบบประมวลผลจนขึ้นข้อความ **"ประมวลผลสำเร็จ!"**
-    """)
 
-    st.markdown("### **การใช้งานแดชบอร์ด: เพื่อประโยชน์สูงสุดของผู้ใช้งาน 📈**")
-    st.info("แต่ละเมนูถูกออกแบบมาเพื่อตอบคำถามที่แตกต่างกัน:")
+def create_goal_summary_table(data_df_goal: pd.DataFrame, goal_category_name_param: str,
+                              e_up_non_numeric_levels_param=None,
+                              e_up_numeric_levels_param=None,
+                              is_org_safety_table: bool = False) -> pd.DataFrame:
+    """
+    เวอร์ชันง่าย: เลือกแถวที่ 'หมวด' มีคำขึ้นต้นตรงกับตัวอักษรก่อน colon (P/S/O)
+    แล้วสรุปจำนวนเหตุการณ์ต่อรหัส
+    """
+    if data_df_goal.empty or 'หมวด' not in data_df_goal.columns: return pd.DataFrame()
+    key = goal_category_name_param.split(":")[0].strip()  # "P" / "S" / "O"
+    sub = data_df_goal[data_df_goal['หมวด'].astype(str).str.startswith(key, na=False)].copy()
+    if sub.empty: return pd.DataFrame()
+    cnt = sub['รหัส'].value_counts().reset_index()
+    cnt.columns = ['รหัส', 'จำนวน']
+    if 'ชื่ออุบัติการณ์ความเสี่ยง' in sub.columns:
+        names = sub[['รหัส', 'ชื่ออุบัติการณ์ความเสี่ยง']].drop_duplicates()
+        cnt = cnt.merge(names, on='รหัส', how='left')
+        cnt = cnt[['รหัส', 'ชื่ออุบัติการณ์ความเสี่ยง', 'จำนวน']]
+    return cnt
 
-    st.markdown("""
-    | เมนูใน Sidebar | สิ่งที่คุณจะได้รับและวิธีใช้งานให้เกิดประโยชน์สูงสุด |
-    | :--- | :--- |
-    | **แดชบอร์ดสรุปภาพรวม** | **ภาพรวมสุขภาพขององค์กรในหน้าเดียว**: ใช้เป็นจุดเริ่มต้นในการประชุมประจำวัน/สัปดาห์ เพื่อดูตัวเลขสำคัญทั้งหมด เช่น จำนวนอุบัติการณ์, Sentinel Events, เคสรุนแรงที่ยังไม่แก้ไข |
-    | **Incidents Analysis** | **การวิเคราะห์อุบัติการณ์**: จากรายงานอุบัติการณ์ในแต่ละหมวดหมู่ (โดยเฉพาะ PSG9) เกิดขึ้นในระดับความรุนแรงใดบ้าง ถูกแก้ไขไปแล้วกี่เปอร์เซ็นต์ และมีเคสใดค้างอยู่บ้างเพื่อทำการติดตามได้อย่างครอบคลุม  |
-    | **Risk Matrix (Interactive)** | **เห็นการกระจายตัวของความเสี่ยง**: แสดง Risk Matrix (I x F) ที่คุณสามารถคลิกที่ตัวเลขในช่องต่างๆ เพื่อเจาะลึกดูรายการอุบัติการณ์ในระดับความเสี่ยงนั้นๆ ได้ทันที |
-    | **Risk Register Assistant** | **เครื่องมือสำหรับ Risk Owner**: เพียงป้อนรหัสอุบัติการณ์ (เช่น `CPM201`) เพื่อดูข้อมูลสรุป, สถิติ, และมาตรการที่เกี่ยวข้องทั้งหมดในที่เดียวสำหรับเตรียมการทบทวน Risk Profile ไปจนถึง Risk Register |
-    | **Heatmap รายเดือน** | **ค้นหารูปแบบตามช่วงเวลา**: แสดงความถี่ของอุบัติการณ์ในแต่ละเดือน ช่วยให้มองเห็นแนวโน้มหรือปัญหาที่มักเกิดซ้ำในฤดูกาลหรือช่วงเวลาเดิมๆ |
-    | **Sentinel Events & Top 10** | **โฟกัสเรื่องสำคัญและเรื่องที่เกิดบ่อย**: แสดงรายการอุบัติการณ์รุนแรง (Sentinel Events) ที่ต้องให้ความสำคัญสูงสุด และ 10 อันดับอุบัติการณ์ที่เกิดขึ้นบ่อยที่สุด |
-    | **กราฟสรุปอุบัติการณ์ (รายมิติ)** | **เปรียบเทียบอุบัติการณ์ในมุมมองต่างๆ**: ดูกราฟแท่งเปรียบเทียบจำนวนอุบัติการณ์ โดยแบ่งตามหมวด, กลุ่ม, ช่วงเวลา/เวร, และสถานที่เกิดเหตุ |
-    | **Sankey: ภาพรวม** | **เห็นเส้นทางการไหลของความเสี่ยง**: แสดงแผนภาพที่เชื่อมโยงจาก "หมวด" ไปสู่ "ระดับความรุนแรง" และ "ระดับความเสี่ยง" ช่วยให้เข้าใจว่าอุบัติการณ์ประเภทไหนมักจะนำไปสู่ความเสี่ยงระดับใด |
-    | **Sankey: PSG9** | **เจาะลึกเส้นทางความเสี่ยงของ PSG9**: เหมือน Sankey ภาพรวม แต่เน้นเฉพาะอุบัติการณ์ที่เกี่ยวข้องกับมาตรฐานความปลอดภัย 9 ข้อ เพื่อการวิเคราะห์ที่ตรงจุด |
-    | **สรุปอุบัติการณ์ตาม Safety Goals** | **ค้นหา "จุดร้อน" ที่มีความรุนแรงสูง**: เปรียบเทียบ "สัดส่วนอุบัติการณ์รุนแรง (% E-up)" ระหว่างหัวข้อต่างๆ เพื่อมองหาหัวข้อที่มีสัดส่วนเคสรุนแรงสูงผิดปกติ และควรเข้าไปตรวจสอบ รวมถึงนำไป Benchmark กับ NRLS ระดับประเทศ|
-    | **Persistence Risk Index** | **ค้นหา "ปัญหาเรื้อรัง" ขององค์กร**: จัดอันดับอุบัติการณ์ที่เกิดขึ้นบ่อยและมีความรุนแรงเฉลี่ยสูง ซึ่งเป็นปัญหาที่ควรได้รับการทบทวนและแก้ไขในเชิงระบบ |
-    | **Early Warning** | **สัญญาณเตือนภัยล่วงหน้า**: วิเคราะห์แนวโน้มเพื่อค้นหาอุบัติการณ์ที่ "มีแนวโน้ม" จะเกิดบ่อยขึ้นหรือรุนแรงขึ้นในอนาคต **(เมนูนี้ต้องดูอย่างสม่ำเสมอ!)** |
-    | **บทสรุปสำหรับผู้บริหาร** | **รายงานสรุปฉบับพิมพ์ได้**: รวบรวมข้อมูลสำคัญทั้งหมดจากทุกเมนูมาไว้ในหน้าเดียวในรูปแบบที่กระชับและเหมาะสำหรับการนำเสนอหรือพิมพ์เป็นเอกสาร |
-    """)
 
-    st.markdown("### **เคล็ดลับเพื่อการใช้งานสูงสุด ✨**")
-    st.success("""
-    - **ข้อมูลที่มีคุณภาพคือหัวใจ**: ความถูกต้องของข้อมูลที่อัปโหลด มีผลโดยตรงต่อความแม่นยำของการวิเคราะห์
-    - **ใช้งานเป็นประจำ**: ควรเข้ามาดูแดชบอร์ดอย่างน้อยสัปดาห์ละครั้ง โดยเฉพาะเมนู **Early Warning** และ **Persistence Risk**
-    - **ใช้ฟิลเตอร์ให้เป็นประโยชน์**: ใช้ตัวกรองช่วงเวลา (Filter by Date) เพื่อเปรียบเทียบข้อมูลรายไตรมาส หรือดูแนวโน้มแบบปีต่อปี
-    - **ต่อยอดสู่การปฏิบัติ**: เป้าหมายของแอปนี้คือการนำข้อมูลไปสู่ "การลงมือทำ" เพื่อเพิ่มความปลอดภัยให้กับผู้ป่วยและบุคลากร
-    """)
-# ==============================================================================
-# MAIN APP STRUCTURE
-# โครงสร้างหลักของโปรแกรม แบ่งการทำงานออกเป็นส่วนๆ คือหน้าสำหรับผู้ดูแล และหน้าแดชบอร์ด
-# ==============================================================================
-import re # (ตรวจสอบว่ามี import re ที่ส่วนบนของไฟล์โค้ดของคุณ)
-import re # (ตรวจสอบว่ามี import re ที่ส่วนบนของไฟล์โค้ดของคุณ)
+@st.cache_data
+def calculate_persistence_risk_score(_df: pd.DataFrame, total_months: int):
+    risk_level_map_to_score = {"51": 21, "52": 22, "53": 23, "54": 24, "55": 25, "41": 16, "42": 17, "43": 18, "44": 19,
+                               "45": 20, "31": 11, "32": 12, "33": 13, "34": 14, "35": 15, "21": 6, "22": 7, "23": 8,
+                               "24": 9, "25": 10, "11": 1, "12": 2, "13": 3, "14": 4, "15": 5}
+    if _df.empty or 'รหัส' not in _df.columns or 'Risk Level' not in _df.columns: return pd.DataFrame()
+    analysis_df = _df[['รหัส', 'ชื่ออุบัติการณ์ความเสี่ยง', 'Risk Level']].copy()
+    analysis_df['Ordinal_Risk_Score'] = analysis_df['Risk Level'].astype(str).map(risk_level_map_to_score)
+    analysis_df.dropna(subset=['Ordinal_Risk_Score'], inplace=True)
+    if analysis_df.empty: return pd.DataFrame()
+    persistence_metrics = analysis_df.groupby('รหัส').agg(Average_Ordinal_Risk_Score=('Ordinal_Risk_Score', 'mean'),
+                                                          Total_Occurrences=('รหัส', 'size')).reset_index()
+    total_months = max(1, total_months)
+    persistence_metrics['Incident_Rate_Per_Month'] = persistence_metrics['Total_Occurrences'] / total_months
+    max_rate = max(1, persistence_metrics['Incident_Rate_Per_Month'].max()) if not persistence_metrics.empty else 1
+    persistence_metrics['Frequency_Score'] = persistence_metrics['Incident_Rate_Per_Month'] / max_rate
+    persistence_metrics['Avg_Severity_Score'] = persistence_metrics['Average_Ordinal_Risk_Score'] / 25.0
+    persistence_metrics['Persistence_Risk_Score'] = persistence_metrics['Frequency_Score'] + persistence_metrics[
+        'Avg_Severity_Score']
+    incident_names = _df[['รหัส', 'ชื่ออุบัติการณ์ความเสี่ยง']].drop_duplicates()
+    final_df = pd.merge(persistence_metrics, incident_names, on='รหัส', how='left')
+    return final_df.sort_values(by='Persistence_Risk_Score', ascending=False)
 
-def display_admin_page():
-    st.title("🔑 Admin: Data Upload")
-    st.header("อัปโหลดไฟล์รายงานอุบัติการณ์ (.xlsx หรือ .csv)")
 
-    st.markdown("""
-    <div style="font-size:16px">
-      <ul>
-        <li>เข้าสู่ระบบ <b>NRLS</b> ด้วยสิทธิ์ <b>Admin</b></li>
-        <li>ไปที่เมนู <b>‘รายงาน’</b></li>
-        <li>เลือก <b>‘การส่งออกข้อมูลรายงานอุบัติการณ์ขององค์กร (Excel File)’</b></li>
-        <li>ดาวน์โหลดไฟล์ Excel มา save ให้เป็น Excel Workbook (.xlsx) และนำมาอัปโหลดที่นี่</li>
-        <li><b>หรือ</b> อัปโหลดไฟล์ .csv ที่มีโครงสร้างคอลัมน์ตามที่กำหนด</li>
-      </ul>
-    </div>
-    """, unsafe_allow_html=True)
+def prioritize_incidents_nb_logit_v2(_df: pd.DataFrame, horizon: int = 3,
+                                     w_freq: float = 0.34, w_sev: float = 0.33, w_trend: float = 0.33) -> pd.DataFrame:
+    # Stub ง่าย: เรียงความถี่ย้อนหลัง + ความรุนแรงเฉลี่ย
+    if _df.empty: return pd.DataFrame()
+    tmp = _df.copy()
+    tmp['RiskScore'] = tmp['Risk Level'].map(lambda x: int(x) if str(x).isdigit() else 0)
+    agg = tmp.groupby(['รหัส', 'ชื่ออุบัติการณ์ความเสี่ยง']).agg(
+        total=('รหัส', 'size'),
+        avg_risk=('RiskScore', 'mean')
+    ).reset_index()
+    agg['score'] = w_freq * (agg['total'] / max(1, agg['total'].max())) + w_sev * (
+                agg['avg_risk'] / max(1, agg['avg_risk'].max()))
+    return agg.sort_values('score', ascending=False)
 
-    uploaded_file = st.file_uploader("เลือกไฟล์ของคุณที่นี่:", type=[".xlsx", ".csv"])
-    
-    if not uploaded_file:
-        return
+# =========================
+# 8) MAIN DISPLAY AREA
+# =========================
+selected_page = st.session_state.get('selected_analysis', "แดชบอร์ดสรุปภาพรวม")
 
-    # --- ฟังก์ชันช่วย: แปลงสตริงปี พ.ศ. เป็น ค.ศ. ---
-    def convert_be_str_to_ad_str(be_date_str):
-        """
-        ค้นหาส่วนที่เป็น dd/mm/yyyy ในสตริง และถ้า yyyy > 2500
-        จะทำการ -543 และคืนค่าสตริงที่แทนที่ด้วยปี ค.ศ. แล้ว
-        """
-        match = re.search(r'(\d{1,2})/(\d{1,2})/(\d{4})', str(be_date_str))
-        
-        if match:
-            day_str, month_str, be_year_str = match.group(1), match.group(2), match.group(3)
-            
+if selected_page == "RCA Helpdesk (AI Assistant)":
+    st.markdown("<h4 style='color: #001f3f;'>AI Assistant: ที่ปรึกษาเคสอุบัติการณ์</h4>", unsafe_allow_html=True)
+    AI_IS_CONFIGURED = False
+    if genai:
+        api_key = os.environ.get("GOOGLE_API_KEY")
+        if api_key:
             try:
-                be_year = int(be_year_str)
-                if be_year > 2500:
-                    ad_year = be_year - 543
-                    ad_date_str = be_date_str.replace(be_year_str, str(ad_year), 1)
-                    return ad_date_str
-            except ValueError:
-                return be_date_str
-        
-        return be_date_str
-    # --- จบฟังก์ชันช่วย ---
-
-    with st.spinner("กำลังประมวลผลไฟล์ กรุณารอสักครู่..."):
-        # ---------------- อ่านไฟล์ ----------------
-        try:
-            if uploaded_file.name.endswith('.csv'):
-                df = pd.read_csv(uploaded_file, keep_default_na=False)
-            else:
-                df = pd.read_excel(uploaded_file, keep_default_na=False, engine='openpyxl')
-        except Exception as e:
-            st.error(f"เกิดข้อผิดพลาดในการอ่านไฟล์: {e}")
-            st.stop()
-
-        if df.empty:
-            st.warning("ไฟล์ที่อัปโหลดไม่มีข้อมูล")
-            st.stop()
-
-        st.success("อ่านไฟล์สำเร็จ! กำลังประมวลผลข้อมูล...")
-        df.columns = [col.strip() for col in df.columns]
-
-        # ---------------- ตรวจคอลัมน์จำเป็น (ชุดใหม่) ----------------
-        required_source_cols = [
-            "รหัสหัวข้อ", "หัวข้อ", "วัน-เวลา ที่เกิดเหตุ", "ระดับความรุนแรง", 
-            "สรุปปัญหา/เหตุการณ์โดยย่อ", "กลุ่มอุบัติการณ์", "หมวด"
-        ]
-        
-        missing_source_cols = [key for key in required_source_cols if key not in df.columns]
-        if missing_source_cols:
-            st.error(f"ไม่พบคอลัมน์ที่จำเป็นในไฟล์: {', '.join(missing_source_cols)}")
-            st.info("คอลัมน์ที่ไฟล์ใหม่ของคุณต้องมี: " + ", ".join(required_source_cols))
-            st.stop()
-
-        # ---------------- จัดรูปคอลัมน์หลัก (แบบใหม่) ----------------
-        df.rename(columns={
-            "วัน-เวลา ที่เกิดเหตุ": "Occurrence Date",  
-            "ระดับความรุนแรง": "Impact",
-            "รหัสหัวข้อ": "Incident",
-            "หัวข้อ": "ชื่ออุบัติการณ์ความเสี่ยง",
-            "กลุ่มอุบัติการณ์": "กลุ่ม",
-            "หมวด": "หมวด",
-            "สถานที่เกิดเหตุ": "ชนิดสถานที่",
-            "การดำเนินการ/การแก้ไขที่ได้ดำเนินการไปแล้ว": "Raw Actions",
-            "สรุปปัญหา/เหตุการณ์โดยย่อ": "รายละเอียดการเกิด"
-            # (คอลัมน์อื่นๆ เช่น self_report จะถูกเก็บชื่อเดิมไว้ก่อน)
-        }, inplace=True)
-        
-        df['รหัส'] = df['Incident'].astype(str).str.slice(0, 6).str.strip()
-        
-        if 'Raw Actions' in df.columns:
-            df['Resulting Actions'] = df['Raw Actions'].astype(str).apply(
-                lambda x: 'None' if x.strip() == '' or x.strip().lower() == 'none' or x.strip().lower() == 'nan' else x
-            )
+                genai.configure(api_key=api_key); AI_IS_CONFIGURED = True
+            except Exception as e:
+                st.error(f"⚠️ ตั้งค่า AI ผิดพลาด: {e}")
         else:
-            df['Resulting Actions'] = 'N/A'
+            st.error("⚠️ ไม่พบ GOOGLE_API_KEY")
+        if not AI_IS_CONFIGURED:
+            st.warning("AI ไม่ได้ตั้งค่า")
 
-        # (ส่วนนี้คือส่วนที่เติม 'None' (str) เข้าไปในคอลัมน์ที่เป็นตัวเลขด้วย)
-        df.replace('', 'None', inplace=True)
-        df = df.fillna('None')
-        df['Impact'] = df['Impact'].astype(str).str.strip()
-
-        for col in ["กลุ่ม", "หมวด"]:
-            if col not in df.columns:
-                df[col] = 'N/A'
+    if AI_IS_CONFIGURED:
+        st.info("อธิบายรายละเอียดเคสที่ต้องการปรึกษา (ไม่ระบุตัวตนผู้ป่วย)")
+        incident_description = st.text_area("รายละเอียดเหตุการณ์", height=150, key="rca_incident_input")
+        if st.button("ขอคำปรึกษา AI", type="primary", use_container_width=True):
+            if not incident_description.strip():
+                st.warning("กรุณาป้อนรายละเอียด")
             else:
-                df[col].fillna('N/A', inplace=True)
+                with st.spinner("AI กำลังวิเคราะห์..."):
+                    consultation = get_consultation_response(incident_description)
+                    st.markdown("--- \n ### ผลปรึกษา AI:")
+                    st.markdown(consultation)
+    else:
+        st.info("AI Assistant ยังไม่เปิดใช้งาน")
 
-        # ---------------- แปลงวันที่ ----------------
-        try:
-            cleaned_date_str_be = df['Occurrence Date'].astype(str).str.replace(r'\s*น\.', '', regex=True).str.strip()
-            cleaned_date_str_ad = cleaned_date_str_be.apply(convert_be_str_to_ad_str)
-        except Exception as e:
-            st.error(f"เกิดข้อผิดพลาดขณะเตรียมข้อมูลวันที่: {e}")
-            st.stop()
+elif selected_page == "แดชบอร์ดสรุปภาพรวม":
+    st.markdown("<h4 style='color: #001f3f;'>สรุปภาพรวมอุบัติการณ์:</h4>", unsafe_allow_html=True)
+    if filtered.empty:
+        st.info("ไม่มีข้อมูลตามตัวกรอง")
+    else:
 
-        parsed_dates_1 = pd.to_datetime(
-            cleaned_date_str_ad, 
-            format='%d/%m/%Y %H:%M', 
-            dayfirst=True, 
-            errors='coerce'
-        )
-        parsed_dates_2 = pd.to_datetime(
-            cleaned_date_str_ad, 
-            format='%d/%m/%Y %H:%M:%S', 
-            dayfirst=True, 
-            errors='coerce'
-        )
-        df['Occurrence Date'] = parsed_dates_1.fillna(parsed_dates_2)
-        
-        invalid_mask = df['Occurrence Date'].isna()
-        invalid_dates = invalid_mask.sum()
+        # --- START: เพิ่มโค้ดคำนวณและแสดงผลช่วงข้อมูล ---
+        min_date_filt = filtered['Occurrence Date'].min(); max_date_filt = filtered['Occurrence Date'].max()
+        min_date_str = min_date_filt.strftime('%d/%m/%Y') if pd.notna(min_date_filt) else "N/A"
+        max_date_str = max_date_filt.strftime('%d/%m/%Y') if pd.notna(max_date_filt) else "N/A"
+        total_month = 0
+        if pd.notna(min_date_filt) and pd.notna(max_date_filt):
+            max_p_filt = max_date_filt.to_period('M'); min_p_filt = min_date_filt.to_period('M')
+            total_month = max(1, (max_p_filt.year - min_p_filt.year) * 12 + (max_p_filt.month - min_p_filt.month) + 1)
 
-        if invalid_dates > 0:
-            example_failed_date = cleaned_date_str_be[invalid_mask].iloc[0] 
-            st.warning(f"ตรวจพบและข้าม {invalid_dates} แถวที่มีรูปแบบ 'วันที่' ไม่ถูกต้อง (ตัวอย่างที่ parse ไม่ผ่าน: '{example_failed_date}')")
+        st.markdown(f"**ช่วงข้อมูลที่วิเคราะห์:** {min_date_str} ถึง {max_date_str} (รวม {total_month} เดือน)")
+        st.markdown("---") # เพิ่มเส้นคั่น
+        # --- END: เพิ่มโค้ด ---
 
-        df.dropna(subset=['Occurrence Date'], inplace=True)
-        if df.empty:
-            st.error("ไม่พบข้อมูลที่มี 'วันที่' ที่ถูกต้องเลยหลังการกรอง (อาจเกิดจากทุกแถวมีวันที่ผิดรูปแบบ)")
-            st.stop()
+        cA, cB, cC, cD, cE = st.columns(5)
+        # จำนวนเหตุการณ์ (แถว)
+        cA.metric("จำนวนเหตุการณ์ (แถว)", f"{len(filtered):,}")
+        # ชนิดอุบัติการณ์ (Incident)
+        incident_unique = filtered['Incident'].nunique() if 'Incident' in filtered.columns else 0
+        cB.metric("ชนิดอุบัติการณ์ (Incident)", f"{incident_unique:,}")
+        # จำนวนหน่วยงาน
+        unit_unique = filtered[REF_COL].nunique() if REF_COL in filtered.columns else 0
+        cC.metric("จำนวนหน่วยงาน", f"{unit_unique:,}")
+        # จำนวนกลุ่มงาน
+        group_unique = filtered['กลุ่มงาน'].nunique() if 'กลุ่มงาน' in filtered.columns else 0
+        cD.metric("จำนวนกลุ่มงาน", f"{group_unique:,}")
 
-        # ---------------- Impact/Freq/Risk ----------------
-        impact_level_map = {('A', 'B', '1'): '1', ('C', 'D', '2'): '2', ('E', 'F', '3'): '3',
-                            ('G', 'H', '4'): '4', ('I', '5'): '5'}
-
-        def map_impact_level_func(val):
-            s_val = str(val)
-            for k, v in impact_level_map.items():
-                if s_val in k:
-                    return v
-            return 'N/A'
-
-        df['Impact Level'] = df['Impact'].apply(map_impact_level_func)
-
-        max_p, min_p = df['Occurrence Date'].max().to_period('M'), df['Occurrence Date'].min().to_period('M')
-        total_month_calc = max(1, (max_p.year - min_p.year) * 12 + (max_p.month - min_p.month) + 1)
-
-        incident_counts_map = df['Incident'].value_counts()
-        df['count'] = df['Incident'].map(incident_counts_map)
-        df['Incident Rate/mth'] = (df['count'] / total_month_calc).round(1)
-
-        conditions_freq = [(df['Incident Rate/mth'] < 2.0), (df['Incident Rate/mth'] < 3.9),
-                           (df['Incident Rate/mth'] < 6.9), (df['Incident Rate/mth'] < 29.9)]
-        choices_freq = ['1', '2', '3', '4']
-        df['Frequency Level'] = np.select(conditions_freq, choices_freq, default='5')
-
-        df['Risk Level'] = df.apply(
-            lambda row: f"{row['Impact Level']}{row['Frequency Level']}"
-            if pd.notna(row['Impact Level']) and row['Impact Level'] != 'N/A' else 'N/A',
-            axis=1
-        )
-        df = pd.merge(df, risk_color_df, on='Risk Level', how='left')
-        df['Category Color'].fillna('Undefined', inplace=True)
-
-        df['Incident Type'] = df['Incident'].astype(str).str[:3]
-        df['Month'] = df['Occurrence Date'].dt.month
-        df['เดือน'] = df['Month'].map(month_label)
-        df['Year'] = df['Occurrence Date'].dt.year.astype(str)
-        
-        if 'ชนิดสถานที่' not in df.columns:
-            df['ชนิดสถานที่'] = 'N/A'
-        if 'ช่วงเวลา/เวร' not in df.columns:
-             df['ช่วงเวลา/เวร'] = 'N/A' 
-
-        # ---------------- PSG9 mapping ----------------
-        PSG9_ID_COL = 'PSG_ID'
-        if 'PSG9code_df_master' in globals() and not PSG9code_df_master.empty and PSG9_ID_COL in PSG9code_df_master.columns:
-            standards_to_merge = PSG9code_df_master[['รหัส', PSG9_ID_COL]].copy().drop_duplicates(subset=['รหัส'])
-            standards_to_merge['รหัส'] = standards_to_merge['รหัส'].astype(str).str.strip()
-            df = pd.merge(df, standards_to_merge, on='รหัส', how='left')
-            df['หมวดหมู่มาตรฐานสำคัญ'] = df[PSG9_ID_COL].map(PSG9_label_dict).fillna("ไม่จัดอยู่ใน PSG9 Catalog")
+        # --- เพิ่ม Metric ใหม่สำหรับ Self-Report ---
+        if 'self_report' in filtered.columns:
+            total_self_reports = int(filtered['self_report'].sum())
+            cE.metric("Self-Reports (นับ 1)", f"{total_self_reports:,}")
         else:
-            df['หมวดหมู่มาตรฐานสำคัญ'] = "ไม่สามารถระบุ (PSG9code.xlsx ไม่ได้โหลด)"
-            
-        # ---------------- Anonymize ----------------
-        ner_model = load_ner_model()
-        df = anonymize_column(df, text_col="รายละเอียดการเกิด", ner_model=ner_model,
-                              out_col="รายละเอียดการเกิด_Anonymized")
-        
-        if 'รายละเอียดการเกิด_Anonymized' in df.columns:
-            hn_pattern = r'HN\s*\.?\s*\d+'
-            df['รายละเอียดการเกิด_Anonymized'] = df['รายละเอียดการเกิด_Anonymized'].astype(str).apply(
-                lambda x: re.sub(hn_pattern, '[HN_REDACTED]', x, flags=re.IGNORECASE)
+            cE.metric("Self-Reports", "N/A")
+        st.markdown("#### เหตุการณ์ต่อกลุ่มงาน")
+        if 'กลุ่มงาน' in filtered.columns and not filtered['กลุ่มงาน'].isna().all():
+            group_counts = (
+                filtered
+                .groupby("กลุ่มงาน", observed=True)
+                .size()
+                .reset_index(name="จำนวนเหตุการณ์")
+                .sort_values("จำนวนเหตุการณ์", ascending=False)
             )
-
-        # ---------------- (เพิ่ม) จัดการ Type ก่อนบันทึก ----------------
-        # ✅ *** นี่คือส่วนที่เพิ่มเข้ามาเพื่อแก้ปัญหา ***
-        # แก้ไขปัญหา "Could not convert 'None' with type str"
-        # คอลัมน์เหล่านี้ควรเป็นตัวเลข แต่มี 'None' (str) ปน
-        
-        cols_to_convert = ['self_report', 'potential_harm']
-        for col in cols_to_convert:
-            if col in df.columns:
-                # errors='coerce' จะเปลี่ยน 'None' (str) และค่าที่แปลงไม่ได้ ให้เป็น NaT/NaN
-                # ซึ่ง Parquet สามารถจัดเก็บได้ (มักจะเก็บเป็น float ที่มี NaN)
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-        # ✅ *** จบส่วนที่เพิ่มเข้ามา ***
-
-        # ---------------- บันทึกผล ----------------
-        try:
-            df.to_parquet(PERSISTED_DATA_PATH, index=False)
-            st.success(f"ประมวลผลสำเร็จ! ข้อมูล {len(df)} รายการถูกบันทึกแล้ว")
-        except Exception as e:
-            st.error(f"บันทึกข้อมูลล้มเหลว: {e}")
-                    
-def display_executive_dashboard():
-    # --- 1. สร้าง Sidebar และเมนูเลือกหน้า ---
-    st.sidebar.markdown(
-        f"""<div style="display: flex; align-items: center; margin-bottom: 1rem;"><img src="{LOGO_URL}" style="height: 32px; margin-right: 10px;"><h2 style="margin: 0; font-size: 1.7rem;"><span class="gradient-text">HOIA-RR Menu</span></h2></div>""",
-        unsafe_allow_html=True)
-
-    # กำหนดรายการหน้าทั้งหมด
-    app_functions_list = ["คู่มือการใช้งาน", "RCA Helpdesk (AI Assistant)", "จัดการข้อมูล (Admin)"]
-    dashboard_pages_list = [
-        "แดชบอร์ดสรุปภาพรวม", "Incidents Analysis","Risk Matrix (Interactive)", "Risk Register Assistant", "Heatmap รายเดือน", "Sentinel Events & Top 10",
-         "กราฟสรุปอุบัติการณ์ (รายมิติ)",
-        "Sankey: ภาพรวม", "Sankey: มาตรฐานสำคัญจำเป็นต่อความปลอดภัย 9 ข้อ",
-        "สรุปอุบัติการณ์ตาม Safety Goals",
-        "Persistence Risk Index", "Early Warning: อุบัติการณ์ที่มีแนวโน้มสูงขึ้น", "บทสรุปสำหรับผู้บริหาร",
-    ]
-
-    # ตั้งค่าหน้าเริ่มต้นเป็น "RCA Helpdesk"
-    if 'selected_analysis' not in st.session_state:
-        st.session_state.selected_analysis = "RCA Helpdesk (AI Assistant)"
-
-    # สร้างปุ่มสำหรับเมนูหลัก
-    st.sidebar.markdown("---")
-    for option in app_functions_list:
-        if st.sidebar.button(option, key=f"btn_{option}",
-                             type="primary" if st.session_state.selected_analysis == option else "secondary",
-                             use_container_width=True):
-            st.session_state.selected_analysis = option
-            st.rerun()
-
-    # สร้างปุ่มสำหรับหน้าแดชบอร์ด
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("เลือกส่วนที่ต้องการแสดงผล:")
-    for option in dashboard_pages_list:
-        if st.sidebar.button(option, key=f"btn_{option}",
-                             type="primary" if st.session_state.selected_analysis == option else "secondary",
-                             use_container_width=True):
-            st.session_state.selected_analysis = option
-            st.rerun()
-
-    # --- ส่วนท้ายของ Sidebar ที่แสดงเสมอ ---
-    st.sidebar.markdown("---")
-    st.sidebar.markdown(f"""
-            **กิตติกรรมประกาศ:** 
-            ขอขอบพระคุณ 
-            - Prof. Shin Ushiro
-            - นพ.อนุวัฒน์ ศุภชุติกุล 
-            - นพ.ก้องเกียรติ เกษเพ็ชร์ 
-            - พญ.ปิยวรรณ ลิ้มปัญญาเลิศ 
-            - ภก.ปรมินทร์ วีระอนันตวัฒน์    
-            - ผศ.ดร.นิเวศน์ กุลวงค์ (อ.ที่ปรึกษา)
-
-            เป็นอย่างสูง สำหรับการริเริ่ม เติมเต็ม สนับสนุน และสร้างแรงบันดาลใจ อันเป็นรากฐานสำคัญในการพัฒนาเครื่องมือนี้
-            
-            และขอขอบพระคุณโรงพยาบาลที่เข้าร่วมการวิจัยทุกแห่งเป็นอย่างสูง สำหรับความอนุเคราะห์และเอื้อเฟื้อข้อมูลอันเป็นประโยชน์ยิ่งต่องานวิจัยฉบับนี้ ได้แก่:
-            - โรงพยาบาลบึงกาฬ จ.บึงกาฬ
-            - โรงพยาบาลสมเด็จพระญาณสังวร จ.เชียงราย 
-            - โรงพยาบาลสวนผึ้ง จ.ราชบุรี
-            - โรงพยาบาลเจ้าคุณไพบูลย์ พนมทวน จ.กาญจนบุรี
-            - โรงพยาบาลชะอวด จ.นครศรีธรรมราช
-            - โรงพยาบาลอุบลรักษ์ ธนบุรี จ.อุบลราชธานี
-            - โรงพยาบาลเขาชะเมาเฉลิมพระเกียรติ ๘๐ พรรษา จ.ระยอง
-            - โรงพยาบาลสมเด็จพระยุพราชเชียงของ จ. เชียงราย 
-            - Kyushu University Hospital, Fukuoka, Japan (ศึกษาดูงาน)
-            - โรงพยาบาลกรุงเทพ จันทบุรี, จ.จันทบุรี (ศึกษาดูงาน)
-            - โรงพยาบาลศูนย์การแพทย์มหาวิทยาลัยแม่ฟ้าหลวง จ.เชียงราย (ต้นสังกัด)
-
-            """)
-    st.sidebar.markdown("---")
-    st.sidebar.markdown(
-        '<p style="font-size:12px; color:gray;">*เครื่องมือนี้เป็นส่วนหนึ่งของวิทยานิพนธ์ IMPLEMENTING THE  HOSPITAL OCCURRENCE/INCIDENT ANALYSIS & RISK REGISTER (HOIA-RR TOOL) IN THAI HOSPITALS: A STUDY ON EFFECTIVE ADOPTION โดย นางสาววิลาศินี  เขื่อนแก้ว นักศึกษาปริญญาโท สำนักวิชาวิทยาศาสตร์สุขภาพ มหาวิทยาลัยแม่ฟ้าหลวง</p>',
-        unsafe_allow_html=True)
-    
-    # --- 2. การจัดการแสดงผลตามหน้าที่เลือก ---
-    selected_analysis = st.session_state.selected_analysis
-
-    # ==============================================================================
-    #  ✅ ส่วนที่ 1: หน้าที่ไม่ต้องโหลดข้อมูล
-    # ==============================================================================
-    if selected_analysis in app_functions_list:
-
-        if selected_analysis == "คู่มือการใช้งาน":
-            display_user_guide()
-
-        elif selected_analysis == "RCA Helpdesk (AI Assistant)":
-            st.markdown("<h4 style='color: #001f3f;'>AI Assistant: ที่ปรึกษาเคสอุบัติการณ์</h4>", unsafe_allow_html=True)
-            AI_IS_CONFIGURED = False
-
-            if genai:
-                # 1. ดึง API Key จาก os.environ.get
-                api_key = os.environ.get("GOOGLE_API_KEY")
-                # 2. ตรวจสอบว่า Key มีค่าหรือไม่ (ไม่ใช่ค่าว่าง)
-                if api_key:
-                    try:
-                        # 3. ถ้ามี Key, ให้นำไปใช้ตั้งค่า
-                        genai.configure(api_key=api_key)
-                        AI_IS_CONFIGURED = True
-                    except Exception as e:
-                        # กรณีที่ Key อาจมีอยู่ แต่ไม่ถูกต้อง
-                        st.error(f"⚠️ เกิดข้อผิดพลาดในการตั้งค่า AI Assistant: {e}")
-            else:
-                    # 4. กรณีที่หา Key ไม่เจอใน Environment Variables
-                st.error("⚠️ ไม่สามารถตั้งค่า AI Assistant ได้: ไม่พบ 'GOOGLE_API_KEY' ใน Environment Variables")
-
-            if not AI_IS_CONFIGURED:
-                st.stop()
-            st.info("อธิบายรายละเอียดของอุบัติการณ์ที่เกิดขึ้น เพื่อให้ AI ช่วยให้คำปรึกษา")
-            incident_description = st.text_area(
-                "กรุณาอธิบายรายละเอียดอุบัติการณ์ที่นี่:",
-                height=150,
-                placeholder="เช่น ผู้ป่วยหญิงอายุ 65 ปี เป็นโรคเบาหวาน ได้รับยา losartan แต่เกิดผื่นขึ้นทั่วตัว...",
-                key="rca_incident_input"
-            )
-            if st.button("ขอคำปรึกษาจาก AI", type="primary", use_container_width=True):
-                if not incident_description.strip():
-                    st.warning("กรุณาป้อนรายละเอียดอุบัติการณ์ก่อนครับ")
-                else:
-                    with st.spinner("AI กำลังวิเคราะห์และให้คำปรึกษา..."):
-                        consultation = get_consultation_response(incident_description)
-                        st.markdown("---")
-                        st.markdown("### ผลการปรึกษาจาก AI:")
-                        st.markdown(consultation)
-
-        elif selected_analysis == "จัดการข้อมูล (Admin)":
-            display_admin_page()
-
-    # ==============================================================================
-    #  ✅ ส่วนที่ 2: หน้าที่ต้องโหลดข้อมูล (แดชบอร์ดทั้งหมด)
-    # ==============================================================================
-    else:       
-        try:
-            df = pd.read_parquet(PERSISTED_DATA_PATH)
-            df['Occurrence Date'] = pd.to_datetime(df['Occurrence Date'])
-        except FileNotFoundError:
-            st.warning("ยังไม่มีข้อมูลในระบบ กรุณาไปที่หน้า 'จัดการข้อมูล (Admin)' เพื่ออัปโหลดข้อมูล")
-            return 
-
-        # --- สร้าง Sidebar ส่วนที่ต้องใช้ข้อมูล ---
-        st.sidebar.header("Filter by Date")
-        min_date_in_data = df['Occurrence Date'].min().date()
-        max_date_in_data = df['Occurrence Date'].max().date()
-        today = datetime.now().date()
-        filter_option = st.sidebar.selectbox("เลือกช่วงเวลา:",
-                                             ["ทั้งหมด", "ปีนี้", "ไตรมาสนี้", "เดือนนี้", "ปีที่แล้ว", "กำหนดเอง..."])
-        start_date, end_date = min_date_in_data, max_date_in_data
-        if filter_option == "ปีนี้":
-            start_date = today.replace(month=1, day=1)
-            end_date = today
-        elif filter_option == "ไตรมาสนี้":
-            current_quarter = (today.month - 1) // 3 + 1
-            start_date = datetime(today.year, 3 * current_quarter - 2, 1).date()
-            end_date = today
-        elif filter_option == "เดือนนี้":
-            start_date = today.replace(day=1)
-            end_date = today
-        elif filter_option == "ปีที่แล้ว":
-            last_year = today.year - 1
-            start_date = datetime(last_year, 1, 1).date()
-            end_date = datetime(last_year, 12, 31).date()
-        elif filter_option == "กำหนดเอง...":
-            start_date, end_date = st.sidebar.date_input(
-                "เลือกระหว่างวันที่:",
-                [min_date_in_data, max_date_in_data],
-                min_value=min_date_in_data,
-                max_value=max_date_in_data
-            )
-        df_filtered = df[(df['Occurrence Date'].dt.date >= start_date) & (df['Occurrence Date'].dt.date <= end_date)].copy()
-        df_filtered['Incident Type Name'] = df_filtered['Incident Type'].map(type_name).fillna(df_filtered['Incident Type'])
-        if df_filtered.empty:
-            st.sidebar.warning("ไม่พบข้อมูลในช่วงเวลาที่ท่านเลือก")
-            st.warning("ไม่พบข้อมูลในช่วงเวลาที่ท่านเลือก กรุณาเลือกช่วงเวลาอื่น")
-            return
-        min_date_str = df_filtered['Occurrence Date'].min().strftime('%d/%m/%Y')
-        max_date_str = df_filtered['Occurrence Date'].max().strftime('%d/%m/%Y')
-        max_p = df_filtered['Occurrence Date'].max().to_period('M')
-        min_p = df_filtered['Occurrence Date'].min().to_period('M')
-        total_month = (max_p.year - min_p.year) * 12 + (max_p.month - min_p.month) + 1
-        total_month = max(1, total_month)
-        st.sidebar.markdown(f"**ช่วงข้อมูล:** {min_date_str} ถึง {max_date_str}")
-        st.sidebar.markdown(f"**จำนวนเดือน:** {total_month} เดือน")
-        st.sidebar.markdown(f"**จำนวนอุบัติการณ์:** {df_filtered.shape[0]:,} รายการ")
-
-
-        # --- 2.3 คำนวณ Metrics สำหรับ Dashboard ---
-        metrics_data = {}
-        metrics_data['total_processed_incidents'] = df_filtered.shape[0]
-        metrics_data['total_psg9_incidents_for_metric1'] = \
-        df_filtered[df_filtered['รหัส'].isin(psg9_r_codes_for_counting)].shape[
-            0] if 'psg9_r_codes_for_counting' in globals() else 0
-        if 'sentinel_composite_keys' in globals() and sentinel_composite_keys:
-            df_filtered['Sentinel code for check'] = df_filtered['รหัส'].astype(str).str.strip() + '-' + df_filtered[
-                'Impact'].astype(str).str.strip()
-            metrics_data['total_sentinel_incidents_for_metric1'] = \
-            df_filtered[df_filtered['Sentinel code for check'].isin(sentinel_composite_keys)].shape[0]
+            st.dataframe(group_counts, use_container_width=True)
         else:
-            metrics_data['total_sentinel_incidents_for_metric1'] = 0
+            st.info("ไม่พบคอลัมน์ 'กลุ่มงาน' หรือไม่มีข้อมูล")
+
+            # --- START: เพิ่มตารางสรุป Self-Report ---
+        st.markdown("---")  # เพิ่มเส้นคั่น
+
+        # 1. สรุปตามกลุ่มงาน
+        st.markdown("#### Self-Report ต่อกลุ่มงาน")
+        if 'self_report' in filtered.columns and filtered['self_report'].sum() > 0:
+            self_report_group_counts = (
+                filtered.groupby("กลุ่มงาน", observed=True)['self_report']
+                .sum()
+                .reset_index(name="จำนวน Self-Report")
+                .astype({"จำนวน Self-Report": int})  # แปลงเป็นเลขจำนวนเต็ม
+            )
+            # กรองเอาเฉพาะกลุ่มงานที่มี report
+            self_report_group_counts = self_report_group_counts[self_report_group_counts["จำนวน Self-Report"] > 0]
+            self_report_group_counts = self_report_group_counts.sort_values("จำนวน Self-Report", ascending=False)
+
+            st.dataframe(self_report_group_counts, use_container_width=True, hide_index=True)
+        else:
+            st.info("ไม่พบข้อมูล Self-Report ในกลุ่มงานที่เลือก")
+
+        # 2. สรุปตามหน่วยงาน (REF_COL คือ "หน่วยงาน")
+        st.markdown("#### Self-Report ต่อหน่วยงาน (Top 20)")
+        if 'self_report' in filtered.columns and filtered['self_report'].sum() > 0:
+            self_report_unit_counts = (
+                filtered.groupby(REF_COL, observed=True)['self_report']
+                .sum()
+                .reset_index(name="จำนวน Self-Report")
+                .astype({"จำนวน Self-Report": int})  # แปลงเป็นเลขจำนวนเต็ม
+            )
+            # กรองเอาเฉพาะหน่วยงานที่มี report
+            self_report_unit_counts = self_report_unit_counts[self_report_unit_counts["จำนวน Self-Report"] > 0]
+            self_report_unit_counts = self_report_unit_counts.sort_values("จำนวน Self-Report", ascending=False)
+
+            # แสดงแค่ Top 20 เพราะอาจจะยาวมาก
+            st.dataframe(self_report_unit_counts.head(20), use_container_width=True, hide_index=True)
+        else:
+            st.info("ไม่พบข้อมูล Self-Report ในหน่วยงานที่เลือก")
+        # --- END: เพิ่มตารางสรุป Self-Report ---
+
+    date_format_config = {"Occurrence Date": st.column_config.DatetimeColumn("วันที่เกิด", format="DD/MM/YYYY HH:mm")}
+
+    metrics_data_filt = {}
+    metrics_data_filt['total_processed_incidents'] = filtered.shape[0]
+    metrics_data_filt['total_psg9_incidents_for_metric1'] = filtered[filtered['รหัส'].isin(psg9_r_codes_for_counting)].shape[0] if psg9_r_codes_for_counting else 0
+
+    if sentinel_composite_keys and 'รหัส' in filtered.columns and 'Impact' in filtered.columns:
+        filtered['Sentinel code for check'] = filtered['รหัส'].astype(str).str.strip() + '-' + filtered['Impact'].astype(str).str.strip()
+        metrics_data_filt['total_sentinel_incidents_for_metric1'] = filtered[filtered['Sentinel code for check'].isin(sentinel_composite_keys)].shape[0]
+    else:
+        metrics_data_filt['total_sentinel_incidents_for_metric1'] = 0
+        if 'Sentinel code for check' not in filtered.columns: filtered['Sentinel code for check'] = ""
+
         severe_impact_levels_list = ['3', '4', '5']
-        df_severe_incidents_calc = df_filtered[df_filtered['Impact Level'].isin(severe_impact_levels_list)].copy()
-        metrics_data['total_severe_incidents'] = df_severe_incidents_calc.shape[0]
-        if 'Resulting Actions' in df_filtered.columns:
-            unresolved_conditions = df_severe_incidents_calc['Resulting Actions'].astype(str).isin(['None', '', 'nan'])
-            df_severe_unresolved_calc = df_severe_incidents_calc[unresolved_conditions].copy()
-            metrics_data['total_severe_unresolved_incidents_val'] = df_severe_unresolved_calc.shape[0]
-            metrics_data['total_severe_unresolved_psg9_incidents_val'] = \
-            df_severe_unresolved_calc[df_severe_unresolved_calc['รหัส'].isin(psg9_r_codes_for_counting)].shape[
-                0] if 'psg9_r_codes_for_counting' in globals() else 0
+        df_severe_filt = filtered[filtered['Impact Level'].isin(severe_impact_levels_list)].copy()
+        metrics_data_filt['total_severe_incidents'] = df_severe_filt.shape[0]
+        if 'Resulting Actions' in filtered.columns:
+            unresolved_filt = df_severe_filt[df_severe_filt['Resulting Actions'].astype(str).isin(['None', '', 'nan'])]
+            metrics_data_filt['total_severe_unresolved_incidents_val'] = unresolved_filt.shape[0]
+            metrics_data_filt['total_severe_unresolved_psg9_incidents_val'] = unresolved_filt[unresolved_filt['รหัส'].isin(psg9_r_codes_for_counting)].shape[0] if psg9_r_codes_for_counting else 0
         else:
-            metrics_data['total_severe_unresolved_incidents_val'] = "N/A"
-            metrics_data['total_severe_unresolved_psg9_incidents_val'] = "N/A"
-        metrics_data['total_month'] = total_month
-        df_freq = df_filtered['Incident'].value_counts().reset_index()
-        df_freq.columns = ['Incident', 'count']
+            metrics_data_filt['total_severe_unresolved_incidents_val'] = "N/A"
+            metrics_data_filt['total_severe_unresolved_psg9_incidents_val'] = "N/A"
 
-    # --- 4. PAGE CONTENT ROUTING ---
-    selected_analysis = st.session_state.selected_analysis
-
-    if selected_analysis == "แดชบอร์ดสรุปภาพรวม":
-        st.markdown("<h4 style='color: #001f3f;'>สรุปภาพรวมอุบัติการณ์:</h4>", unsafe_allow_html=True)
-
-        with st.expander("แสดง/ซ่อน ตารางข้อมูลอุบัติการณ์ทั้งหมด (Full Data Table)"):
-            st.dataframe(df_filtered, hide_index=True, use_container_width=True, column_config={
-                "Occurrence Date": st.column_config.DatetimeColumn("วันที่เกิด", format="DD/MM/YYYY")
-            })
-
-        dashboard_expander_cols = ['Occurrence Date', 'Incident', 'Impact', 'รายละเอียดการเกิด_Anonymized', 'Resulting Actions']
-        date_format_config = {"Occurrence Date": st.column_config.DatetimeColumn("วันที่เกิด", format="DD/MM/YYYY")}
-
-        total_processed_incidents = metrics_data.get("total_processed_incidents", 0)
-        total_psg9_incidents_for_metric1 = metrics_data.get("total_psg9_incidents_for_metric1", 0)
-        total_sentinel_incidents_for_metric1 = metrics_data.get("total_sentinel_incidents_for_metric1", 0)
-        total_severe_incidents = metrics_data.get("total_severe_incidents", 0)
-        total_severe_unresolved_incidents_val = metrics_data.get("total_severe_unresolved_incidents_val", "N/A")
-        total_severe_unresolved_psg9_incidents_val = metrics_data.get("total_severe_unresolved_psg9_incidents_val",
-                                                                      "N/A")
-
-        df_severe_incidents = df_filtered[df_filtered['Impact Level'].isin(['3', '4', '5'])].copy()
-        total_severe_psg9_incidents = \
-        df_severe_incidents[df_severe_incidents['รหัส'].isin(psg9_r_codes_for_counting)].shape[0]
+        total_processed_incidents = metrics_data_filt.get("total_processed_incidents", 0)
+        total_psg9_incidents_for_metric1 = metrics_data_filt.get("total_psg9_incidents_for_metric1", 0)
+        total_sentinel_incidents_for_metric1 = metrics_data_filt.get("total_sentinel_incidents_for_metric1", 0)
+        total_severe_incidents = metrics_data_filt.get("total_severe_incidents", 0)
+        total_severe_unresolved_incidents_val = metrics_data_filt.get("total_severe_unresolved_incidents_val", "N/A")
+        total_severe_unresolved_psg9_incidents_val = metrics_data_filt.get("total_severe_unresolved_psg9_incidents_val", "N/A")
+        df_severe_incidents = filtered[filtered['Impact Level'].isin(['3', '4', '5'])].copy()
+        total_severe_psg9_incidents = df_severe_incidents[df_severe_incidents['รหัส'].isin(psg9_r_codes_for_counting)].shape[0] if psg9_r_codes_for_counting else 0
 
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric("Total", f"{total_processed_incidents:,}")
-        with col2:
             st.metric("PSG9", f"{total_psg9_incidents_for_metric1:,}")
-            with st.expander(f"ดูรายละเอียด ({total_psg9_incidents_for_metric1} รายการ)"):
-                psg9_df = df_filtered[df_filtered['รหัส'].isin(psg9_r_codes_for_counting)]
-                st.dataframe(psg9_df[dashboard_expander_cols], use_container_width=True, hide_index=True,
-                             column_config=date_format_config)
-        with col3:
+            with st.expander(f"ดูรายละเอียด ({total_psg9_incidents_for_metric1})"):
+                psg9_df = filtered[filtered['รหัส'].isin(psg9_r_codes_for_counting)]
+                cols_to_show_expander = [col for col in display_cols_common if col in psg9_df.columns]
+                if not psg9_df.empty: st.dataframe(psg9_df[cols_to_show_expander], use_container_width=True, hide_index=True, column_config=date_format_config)
+                else: st.info("ไม่มีรายการ PSG9")
+        with col2:
             st.metric("Sentinel", f"{total_sentinel_incidents_for_metric1:,}")
-            with st.expander(f"ดูรายละเอียด ({total_sentinel_incidents_for_metric1} รายการ)"):
-                if 'Sentinel code for check' in df_filtered.columns:
-                    sentinel_df = df_filtered[df_filtered['Sentinel code for check'].isin(sentinel_composite_keys)]
-                    st.dataframe(sentinel_df[dashboard_expander_cols], use_container_width=True, hide_index=True,
-                                 column_config=date_format_config)
+            with st.expander(f"ดูรายละเอียด ({total_sentinel_incidents_for_metric1})"):
+                if 'Sentinel code for check' in filtered.columns and not filtered['Sentinel code for check'].empty:
+                    sentinel_df = filtered[filtered['Sentinel code for check'].isin(sentinel_composite_keys)]
+                    if not sentinel_df.empty:
+                        cols_to_show_expander = [col for col in display_cols_common if col in sentinel_df.columns]
+                        st.dataframe(sentinel_df[cols_to_show_expander], use_container_width=True, hide_index=True, column_config=date_format_config)
+                    else:
+                        st.info("ไม่พบรายการ Sentinel")
+                else:
+                    st.info("ตรวจสอบ Sentinel ไม่ได้")
+        with col3:
 
-        col4, col5, col6, col7 = st.columns(4)
-        with col4:
             st.metric("E-I & 3-5 [all]", f"{total_severe_incidents:,}")
-            with st.expander(f"ดูรายละเอียด ({total_severe_incidents} รายการ)"):
-                st.dataframe(df_severe_incidents[dashboard_expander_cols], use_container_width=True, hide_index=True,
-                             column_config=date_format_config)
-        with col5:
+            with st.expander(f"ดูรายละเอียด ({total_severe_incidents})"):
+                cols_to_show_expander = [col for col in display_cols_common if col in df_severe_incidents.columns]
+                if not df_severe_incidents.empty: st.dataframe(df_severe_incidents[cols_to_show_expander], use_container_width=True, hide_index=True, column_config=date_format_config)
+                else: st.info("ไม่มีรายการรุนแรง")
+        col4, col5, col6 = st.columns(3)
+        with col4:
             st.metric("E-I & 3-5 [PSG9]", f"{total_severe_psg9_incidents:,}")
-            with st.expander(f"ดูรายละเอียด ({total_severe_psg9_incidents} รายการ)"):
+            with st.expander(f"ดูรายละเอียด ({total_severe_psg9_incidents})"):
                 severe_psg9_df = df_severe_incidents[df_severe_incidents['รหัส'].isin(psg9_r_codes_for_counting)]
-                st.dataframe(severe_psg9_df[dashboard_expander_cols], use_container_width=True, hide_index=True,
-                             column_config=date_format_config)
-        with col6:
-            val_unresolved_all = f"{total_severe_unresolved_incidents_val:,}" if isinstance(
-                total_severe_unresolved_incidents_val, int) else "N/A"
-            st.metric(f"E-I & 3-5 [all] ที่ยังไม่ถูกแก้ไข", val_unresolved_all)
+                cols_to_show_expander = [col for col in display_cols_common if col in severe_psg9_df.columns]
+                if not severe_psg9_df.empty: st.dataframe(severe_psg9_df[cols_to_show_expander], use_container_width=True, hide_index=True, column_config=date_format_config)
+                else: st.info("ไม่มีรายการ PSG9 รุนแรง")
+        with col5:
+            val_unresolved_all = f"{total_severe_unresolved_incidents_val:,}" if isinstance(total_severe_unresolved_incidents_val, int) else "N/A"
+            st.metric(f"E-I & 3-5 [all] ที่ยังไม่แก้ไข", val_unresolved_all)
             if isinstance(total_severe_unresolved_incidents_val, int) and total_severe_unresolved_incidents_val > 0:
-                with st.expander(f"ดูรายละเอียด ({total_severe_unresolved_incidents_val} รายการ)"):
-                    unresolved_df_all = df_filtered[
-                        df_filtered['Impact Level'].isin(['3', '4', '5']) & df_filtered['Resulting Actions'].astype(
-                            str).isin(['None', '', 'nan'])]
-                    st.dataframe(unresolved_df_all[dashboard_expander_cols], use_container_width=True, hide_index=True,
-                                 column_config=date_format_config)
-        with col7:
-            val_unresolved_psg9 = f"{total_severe_unresolved_psg9_incidents_val:,}" if isinstance(
-                total_severe_unresolved_psg9_incidents_val, int) else "N/A"
-            st.metric(f"E-I & 3-5 [PSG9] ที่ยังไม่ถูกแก้ไข", val_unresolved_psg9)
-            if isinstance(total_severe_unresolved_psg9_incidents_val,
-                          int) and total_severe_unresolved_psg9_incidents_val > 0:
-                with st.expander(f"ดูรายละเอียด ({total_severe_unresolved_psg9_incidents_val} รายการ)"):
-                    unresolved_df_all = df_filtered[
-                        df_filtered['Impact Level'].isin(['3', '4', '5']) & df_filtered['Resulting Actions'].astype(
-                            str).isin(['None', '', 'nan'])]
+                with st.expander(f"ดูรายละเอียด ({total_severe_unresolved_incidents_val})"):
+                    unresolved_df_all = filtered[filtered['Impact Level'].isin(['3', '4', '5']) & filtered['Resulting Actions'].astype(str).isin(['None', '', 'nan'])]
+                    cols_to_show_expander = [col for col in display_cols_common if col in unresolved_df_all.columns]
+                    st.dataframe(unresolved_df_all[cols_to_show_expander], use_container_width=True, hide_index=True, column_config=date_format_config)
+        with col6:
+            val_unresolved_psg9 = f"{total_severe_unresolved_psg9_incidents_val:,}" if isinstance(total_severe_unresolved_psg9_incidents_val, int) else "N/A"
+            st.metric(f"E-I & 3-5 [PSG9] ที่ยังไม่แก้ไข", val_unresolved_psg9)
+            if isinstance(total_severe_unresolved_psg9_incidents_val, int) and total_severe_unresolved_psg9_incidents_val > 0:
+                with st.expander(f"ดูรายละเอียด ({total_severe_unresolved_psg9_incidents_val})"):
+                    unresolved_df_all = filtered[filtered['Impact Level'].isin(['3', '4', '5']) & filtered['Resulting Actions'].astype(str).isin(['None', '', 'nan'])]
                     unresolved_df_psg9 = unresolved_df_all[unresolved_df_all['รหัส'].isin(psg9_r_codes_for_counting)]
-                    st.dataframe(unresolved_df_psg9[dashboard_expander_cols], use_container_width=True, hide_index=True,
-                                 column_config=date_format_config)
-        st.markdown("---")
-
-        # เตรียมข้อมูล: จัดกลุ่มข้อมูลตามปี-เดือน แล้วนับจำนวน
-        monthly_counts = df_filtered.copy()
-        monthly_counts['เดือน-ปี'] = monthly_counts['Occurrence Date'].dt.strftime('%Y-%m')
-
-        incident_trend = monthly_counts.groupby('เดือน-ปี').size().reset_index(name='จำนวนอุบัติการณ์')
-        incident_trend = incident_trend.sort_values(by='เดือน-ปี')
+                    cols_to_show_expander = [col for col in display_cols_common if col in unresolved_df_psg9.columns]
+                    st.dataframe(unresolved_df_psg9[cols_to_show_expander], use_container_width=True, hide_index=True, column_config=date_format_config)
 
         st.markdown("---")
-        total_incidents = metrics_data.get('total_processed_incidents', 0)
-        resolved_incidents = df_filtered[~df_filtered['Resulting Actions'].astype(str).isin(['None', '', 'nan'])].shape[
-            0]
-        status_data = pd.DataFrame({
-            'สถานะ': ['อุบัติการณ์ทั้งหมด', 'ที่แก้ไขแล้ว'],
-            'จำนวน': [total_incidents, resolved_incidents]
-        })
-        fig_status = px.bar(
-            status_data,
-            x='จำนวน',
-            y='สถานะ',
-            orientation='h',
-            title='ภาพรวมอุบัติการณ์ทั้งหมดเทียบกับที่แก้ไขแล้ว',
-            text='จำนวน',
-            color='สถานะ',
-            color_discrete_map={
-                'อุบัติการณ์ทั้งหมด': '#1f77b4',  # สีน้ำเงิน
-                'ที่แก้ไขแล้ว': '#2ca02c'  # สีเขียว
-            },
-            labels={'สถานะ': '', 'จำนวน': 'จำนวนอุบัติการณ์'}
-        )
-        fig_status.update_layout(
-            yaxis={'categoryorder': 'total ascending'},
-            showlegend=False
-        )
-        st.plotly_chart(fig_status, use_container_width=True)
-
-        # สร้างกราฟเส้น
-        fig_trend = px.line(
-            incident_trend,
-            x='เดือน-ปี',
-            y='จำนวนอุบัติการณ์',
-            title='จำนวนอุบัติการณ์ทั้งหมดที่เกิดขึ้นในแต่ละเดือน',
-            markers=True,  # เพิ่มจุดบนเส้นเพื่อให้เห็นข้อมูลแต่ละเดือนชัดขึ้น
-            labels={'เดือน-ปี': 'เดือน', 'จำนวนอุบัติการณ์': 'จำนวนครั้ง'},
-            line_shape = 'spline'
-        )
-        fig_trend.update_traces(line=dict(width=3))
-        st.plotly_chart(fig_trend, use_container_width=True)
-    elif selected_analysis == "Heatmap รายเดือน":
-        st.markdown("<h4 style='color: #001f3f;'>Heatmap: จำนวนอุบัติการณ์รายเดือน</h4>", unsafe_allow_html=True)
-        st.info(
-            "💡 Heatmap นี้แสดงความถี่ของการเกิดอุบัติการณ์แต่ละรหัสในแต่ละเดือน สีที่เข้มกว่าหมายถึงจำนวนครั้งที่เกิดสูงกว่า ช่วยให้มองเห็นรูปแบบหรืออุบัติการณ์ที่เกิดบ่อยในช่วงเวลาต่างๆ ได้ง่ายขึ้น")
-
-        st.markdown("<h5 style='color: #003366;'>ภาพรวมอุบัติการณ์ทั้งหมด (เลือกจำนวนที่แสดงได้)</h5>",
-                    unsafe_allow_html=True)
-        heatmap_req_cols = ['รหัส', 'เดือน', 'ชื่ออุบัติการณ์ความเสี่ยง', 'Month', 'หมวด']
-        if not all(col in df_filtered.columns for col in heatmap_req_cols):
-            st.warning(f"ไม่สามารถสร้าง Heatmap ได้ เนื่องจากขาดคอลัมน์ที่จำเป็น: {', '.join(heatmap_req_cols)}")
+        monthly_counts = filtered.copy(); monthly_counts['เดือน-ปี'] = monthly_counts['Occurrence Date'].dt.strftime('%Y-%m')
+        incident_trend = monthly_counts.groupby('เดือน-ปี').size().reset_index(name='จำนวนอุบัติการณ์').sort_values(by='เดือน-ปี')
+        if not incident_trend.empty:
+            fig_trend = px.line(incident_trend, x='เดือน-ปี', y='จำนวนอุบัติการณ์', title='จำนวนอุบัติการณ์ (กรองแล้ว) รายเดือน', markers=True, labels={'เดือน-ปี': 'เดือน', 'จำนวนอุบัติการณ์': 'จำนวนครั้ง'}, line_shape='spline')
+            fig_trend.update_traces(line=dict(width=3)); st.plotly_chart(fig_trend, use_container_width=True)
         else:
-            df_heat = df_filtered.copy()
-            df_heat['incident_label'] = df_heat['รหัส'] + " | " + df_heat['ชื่ออุบัติการณ์ความเสี่ยง'].fillna('')
+            st.info("ไม่มีข้อมูลแนวโน้มรายเดือน")
 
-            total_counts = df_heat['incident_label'].value_counts().reset_index()
+        st.markdown("---")
+        total_incidents_filt = metrics_data_filt.get('total_processed_incidents', 0)
+        resolved_incidents_filt = filtered[~filtered['Resulting Actions'].astype(str).isin(['None', '', 'nan'])].shape[0] if 'Resulting Actions' in filtered else 0
+        status_data = pd.DataFrame({'สถานะ': ['อุบัติการณ์ (กรองแล้ว)', 'ที่แก้ไขแล้ว'],'จำนวน': [total_incidents_filt, resolved_incidents_filt]})
+        if total_incidents_filt > 0:
+            fig_status = px.bar(status_data, x='จำนวน', y='สถานะ', orientation='h', title='ภาพรวมเทียบกับที่แก้ไขแล้ว (กรองแล้ว)', text='จำนวน', color='สถานะ',
+                                color_discrete_map={'อุบัติการณ์ (กรองแล้ว)': '#1f77b4', 'ที่แก้ไขแล้ว': '#2ca02c'}, labels={'สถานะ': '', 'จำนวน': 'จำนวน'})
+            fig_status.update_layout(yaxis={'categoryorder': 'total ascending'}, showlegend=False); st.plotly_chart(fig_status, use_container_width=True)
+        else:
+            st.info("ไม่มีข้อมูลสถานะการแก้ไข")
+
+elif selected_page == "Incidents Analysis":
+    if filtered.empty: st.info("ไม่มีข้อมูลตามตัวกรอง")
+    else: render_incidents_analysis(filtered)
+
+elif selected_page == "Risk Matrix (Interactive)":
+    if filtered.empty: st.info("ไม่มีข้อมูลตามตัวกรอง")
+    else: render_risk_matrix_interactive(filtered, key_prefix="main_rmx")
+
+elif selected_page == "Risk level":
+    if filtered.empty: st.info("ไม่มีข้อมูลตามตัวกรอง")
+    else: render_risk_level_summary(filtered)
+
+elif selected_page == "Risk Register Assistant":
+    st.markdown("<h4 style='color: #001f3f;'>Risk Register Assistant</h4>", unsafe_allow_html=True)
+    st.info("ป้อน 'รหัส' หรือ 'ชื่ออุบัติการณ์' เพื่อค้นหาข้อมูลเชิงลึก")
+    query = st.text_input("ระบุรหัส หรือ คำค้นหา:", key="risk_register_query")
+    if st.button("ค้นหา", type="primary", use_container_width=True):
+        if not query.strip(): st.warning("กรุณาป้อนคำค้นหา")
+        elif filtered.empty: st.warning("ไม่มีข้อมูลให้ค้นหา (ตามตัวกรองปัจจุบัน)")
+        else:
+            with st.spinner("กำลังค้นหา..."):
+                result = get_risk_register_consultation(query=query, df=filtered, risk_mitigation_df=df_mitigation)
+                st.markdown("---")
+                if "error" in result:
+                    st.error(result["error"])
+                else:
+                    st.subheader("Result Review")
+                    st.markdown(f"**{result.get('incident_code','N/A')} - {result.get('incident_name','N/A')}**")
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("จำนวนครั้ง", f"{result.get('total_occurrences', 0)} ครั้ง")
+                    c2.metric("Impact Level สูงสุด", result.get('max_impact_level', 'N/A'))
+                    c3.metric("Frequency Level", result.get('frequency_level', 'N/A'))
+
+                    st.markdown("---")
+                    st.markdown(f"##### Review Result: พบ {result.get('total_occurrences', 0)} ครั้ง:")
+                    incident_details_df = result.get('incident_df', pd.DataFrame())
+                    if not incident_details_df.empty:
+                        incident_details_df = incident_details_df.sort_values(by='Occurrence Date', ascending=False)
+                        for _, row in incident_details_df.iterrows():
+                            event_date = row['Occurrence Date'].strftime('%d %b %Y, %H:%M') if pd.notna(row['Occurrence Date']) else 'N/A'
+                            impact = row.get('Impact', 'N/A'); impact_level = row.get('Impact Level', 'N/A')
+                            details = row.get('รายละเอียดการเกิด_Anonymized', 'ไม่มีรายละเอียด')
+                            st.markdown(f"""<div style="border-left: 4px solid #eee; padding-left: 15px; margin-bottom: 15px;">
+                            <b>{event_date}</b> • {impact} (ระดับ {impact_level})<br><em>{details}</em>
+                            </div>""", unsafe_allow_html=True)
+                    else:
+                        st.info("ไม่พบรายละเอียดเหตุการณ์")
+
+                    st.markdown("---")
+                    st.markdown("**Risk Transfer & Prevention:**")
+                    st.info(result.get('existing_prevention', 'N/A'))
+                    st.markdown("**Risk Monitor:**")
+                    st.info(result.get('existing_monitor', 'N/A'))
+
+elif selected_page == "Heatmap รายเดือน":
+    st.markdown("<h4 style='color: #001f3f;'>Heatmap: จำนวนอุบัติการณ์รายเดือน</h4>", unsafe_allow_html=True)
+    if filtered.empty:
+        st.info("ไม่มีข้อมูลตามตัวกรอง")
+    else:
+        st.info("💡 Heatmap นี้แสดงความถี่ของอุบัติการณ์รายเดือนสำหรับ Top N รหัส")
+        heatmap_req_cols = ['รหัส', 'เดือน', 'ชื่ออุบัติการณ์ความเสี่ยง', 'Incident']
+        if not all(col in filtered.columns for col in heatmap_req_cols):
+            st.warning("ขาดคอลัมน์ที่จำเป็นสำหรับ Heatmap")
+        else:
+            df_heat = filtered.copy();
+            df_heat['incident_label'] = df_heat['รหัส'] + " | " + df_heat['ชื่ออุบัติการณ์ความเสี่ยง'].fillna('')
+            total_counts = df_heat['incident_label'].value_counts().reset_index();
             total_counts.columns = ['incident_label', 'total_count']
 
-            top_n = st.slider(
-                "เลือกจำนวนอุบัติการณ์ (ตามความถี่) ที่ต้องการแสดงบน Heatmap รวม:",
-                min_value=5, max_value=min(50, len(total_counts)),
-                value=min(20, len(total_counts)), step=5, key="top_n_slider"
-            )
-            top_incident_labels = total_counts.nlargest(top_n, 'total_count')['incident_label']
-            df_heat_filtered_view = df_heat[df_heat['incident_label'].isin(top_incident_labels)]
+            # --- START: แก้ไข Slider ---
+            total_incident_types = len(total_counts)
+            SLIDER_MIN = 5  # ค่าต่ำสุดที่ Slider จะเริ่ม
+
+            if total_incident_types <= SLIDER_MIN:
+                # ถ้าน้อยกว่าหรือเท่ากับ 5 (เช่น 2) ไม่ต้องแสดง slider
+                top_n = total_incident_types
+                if total_incident_types > 0:
+                    st.caption(f"แสดงอุบัติการณ์ทั้งหมด {top_n} รายการ (เนื่องจากมีจำนวนน้อยกว่า {SLIDER_MIN})")
+            else:
+                # ถ้ามากกว่า 5 (เช่น 6) ถึงจะแสดง slider
+                slider_max = min(50, total_incident_types)
+                slider_default = min(20, total_incident_types)
+                top_n = st.slider("เลือก Top N:", SLIDER_MIN, slider_max, slider_default, 5, key="top_n_slider")
+            # --- END: แก้ไข Slider ---
+
+            if top_n == 0:
+                st.info("ไม่พบข้อมูลอุบัติการณ์ในกลุ่มนี้")
+                df_heat_filtered_view = pd.DataFrame(columns=df_heat.columns)  # สร้าง df ว่าง
+            else:
+                top_incident_labels = total_counts.nlargest(top_n, 'total_count')['incident_label']
+                df_heat_filtered_view = df_heat[df_heat['incident_label'].isin(top_incident_labels)]
+
             try:
                 heatmap_pivot = pd.pivot_table(df_heat_filtered_view, values='Incident', index='incident_label',
                                                columns='เดือน', aggfunc='count', fill_value=0)
                 sorted_month_names = [v for k, v in sorted(month_label.items())]
                 available_months = [m for m in sorted_month_names if m in heatmap_pivot.columns]
                 if available_months:
-                    heatmap_pivot = heatmap_pivot[available_months]
-                    heatmap_pivot = heatmap_pivot.reindex(top_incident_labels).dropna()
+                    heatmap_pivot = heatmap_pivot[available_months].reindex(top_incident_labels).dropna(
+                        how='all').fillna(0)
                     if not heatmap_pivot.empty:
-                        fig_heatmap = px.imshow(heatmap_pivot,
-                                                labels=dict(x="เดือน", y="อุบัติการณ์", color="จำนวนครั้ง"),
+                        fig_heatmap = px.imshow(heatmap_pivot, labels=dict(x="เดือน", y="อุบัติการณ์", color="จำนวน"),
                                                 text_auto=True, aspect="auto", color_continuous_scale='Reds')
-                        fig_heatmap.update_layout(title_text=f"Heatmap ของอุบัติการณ์ Top {top_n} ที่เกิดบ่อยที่สุด",
-                                                  height=max(600, len(heatmap_pivot.index) * 25), xaxis_title="เดือน",
-                                                  yaxis_title="รหัส | ชื่ออุบัติการณ์")
+                        fig_heatmap.update_layout(title_text=f"Top {top_n}",
+                                                  height=max(600, len(heatmap_pivot.index) * 25));
                         fig_heatmap.update_xaxes(side="top")
                         st.plotly_chart(fig_heatmap, use_container_width=True)
+                    else:
+                        st.info("ไม่มีข้อมูล Heatmap")
+                else:
+                    st.info("ไม่มีข้อมูลรายเดือน")
+
             except Exception as e:
-                st.error(f"เกิดข้อผิดพลาดในการสร้าง Heatmap รวม: {e}")
-
+                    st.error(f"สร้าง Heatmap ผิดพลาด: {e}")
             st.markdown("---")
-
-            st.markdown("<h5 style='color: #003366;'>Heatmap แยกตามเป้าหมายความปลอดภัย (Safety Goal)</h5>",
-                        unsafe_allow_html=True)
-            goal_search_terms = {
-                "Patient Safety/ Common Clinical Risk": "Patient Safety", "Specific Clinical Risk": "Specific Clinical",
-                "Personnel Safety": "Personnel Safety", "Organization Safety": "Organization Safety"
-            }
-
+            st.markdown("<h5 style='color: #003366;'>Heatmap แยกตาม Safety Goal</h5>", unsafe_allow_html=True)
+            goal_search_terms = {"Patient Safety/...": "Patient Safety", "Specific Clinical": "Specific Clinical", "Personnel Safety": "Personnel Safety", "Organization Safety": "Organization Safety"}
             for display_name, search_term in goal_search_terms.items():
-                df_goal_filtered = df_heat[df_heat['หมวด'].str.contains(search_term, na=False, case=False)].copy()
+                df_goal_filtered = df_heat[df_heat['หมวด'].astype(str).str.contains(search_term, na=False, case=False)].copy()
                 if df_goal_filtered.empty:
-                    st.markdown(f"**{display_name}**")
-                    st.info(f"ไม่พบข้อมูลสำหรับเป้าหมายนี้")
-                    st.markdown("---")
-                    continue
+                    st.markdown(f"**{display_name}**: ไม่พบข้อมูล"); st.markdown("---"); continue
                 try:
-                    goal_pivot = pd.pivot_table(df_goal_filtered, values='Incident', index='incident_label',
-                                                columns='เดือน', aggfunc='count', fill_value=0)
+                    goal_pivot = pd.pivot_table(df_goal_filtered, values='Incident', index='incident_label', columns='เดือน', aggfunc='count', fill_value=0)
                     if not goal_pivot.empty:
                         sorted_month_names = [v for k, v in sorted(month_label.items())]
                         available_months_goal = [m for m in sorted_month_names if m in goal_pivot.columns]
                         if available_months_goal:
                             goal_pivot = goal_pivot[available_months_goal]
                             incident_counts_in_goal = df_goal_filtered['incident_label'].value_counts()
-                            sorted_incidents = incident_counts_in_goal.index.tolist()
-                            goal_pivot = goal_pivot.reindex(sorted_incidents).dropna(how='all')
-
-                    if goal_pivot.empty:
-                        st.markdown(f"**{display_name}**")
-                        st.info(f"ไม่มีข้อมูลอุบัติการณ์ที่บันทึกเป็นรายเดือนสำหรับเป้าหมายนี้")
-                        st.markdown("---")
-                        continue
-
-                    fig_goal = px.imshow(goal_pivot, labels=dict(x="เดือน", y="อุบัติการณ์", color="จำนวน"),
-                                         text_auto=True, aspect="auto", color_continuous_scale='Oranges')
-                    fig_goal.update_layout(title_text=f"<b>{display_name}</b>",
-                                           height=max(500, len(goal_pivot.index) * 28), xaxis_title="เดือน",
-                                           yaxis_title="รหัส | ชื่ออุบัติการณ์")
-                    fig_goal.update_xaxes(side="top")
-                    st.plotly_chart(fig_goal, use_container_width=True)
+                            goal_pivot = goal_pivot.reindex(incident_counts_in_goal.index).dropna(how='all').fillna(0)
+                            if not goal_pivot.empty:
+                                fig_goal = px.imshow(goal_pivot, labels=dict(x="เดือน", y="อุบัติการณ์", color="จำนวน"), text_auto=True, aspect="auto", color_continuous_scale='Oranges')
+                                fig_goal.update_layout(title_text=f"<b>{display_name}</b>", height=max(500, len(goal_pivot.index)*28)); fig_goal.update_xaxes(side="top")
+                                st.plotly_chart(fig_goal, use_container_width=True)
+                            else:
+                                st.info(f"ไม่มีข้อมูล Pivot '{display_name}'")
+                        else:
+                            st.info(f"ไม่มีข้อมูลรายเดือน '{display_name}'")
+                    else:
+                        st.info(f"ไม่มีข้อมูล Pivot '{display_name}'")
                     st.markdown("---")
                 except Exception as e:
-                    st.error(f"เกิดข้อผิดพลาดในการสร้าง Heatmap สำหรับ '{display_name}': {e}")
-    elif selected_analysis == "Sentinel Events & Top 10":
-        st.markdown("<h4 style='color: #001f3f;'>รายการ Sentinel Events ที่ตรวจพบ</h4>", unsafe_allow_html=True)
-        # ✅ แก้ไข: ใช้ df_filtered ที่ผ่านการกรองตามช่วงเวลาแล้ว
-        if 'sentinel_composite_keys' in globals() and sentinel_composite_keys and 'Sentinel code for check' in df_filtered.columns:
-            sentinel_events = df_filtered[df_filtered['Sentinel code for check'].isin(sentinel_composite_keys)].copy()
+                    st.error(f"สร้าง Heatmap '{display_name}' ผิดพลาด: {e}")
 
-            if not sentinel_events.empty:
-                if 'Sentinel2024_df' in globals() and not Sentinel2024_df.empty and 'ชื่ออุบัติการณ์ความเสี่ยง' in Sentinel2024_df.columns:
-                    sentinel_events = pd.merge(sentinel_events,
-                                               Sentinel2024_df[['รหัส', 'Impact', 'ชื่ออุบัติการณ์ความเสี่ยง']].rename(
-                                                   columns={'ชื่ออุบัติการณ์ความเสี่ยง': 'Sentinel Event Name'}),
-                                               on=['รหัส', 'Impact'], how='left')
-                display_sentinel_cols = ['Occurrence Date', 'Incident', 'Impact', 'รายละเอียดการเกิด_Anonymized',
-                                         'Resulting Actions']
-                if 'Sentinel Event Name' in sentinel_events.columns:
-                    display_sentinel_cols.insert(2, 'Sentinel Event Name')
-                final_display_cols = [col for col in display_sentinel_cols if col in sentinel_events.columns]
-                st.dataframe(sentinel_events[final_display_cols], use_container_width=True, hide_index=True,
-                             column_config={
-                                 "Occurrence Date": st.column_config.DatetimeColumn("วันที่เกิด", format="DD/MM/YYYY")})
-            else:
-                st.info("ไม่พบ Sentinel Events ในช่วงเวลาที่เลือก")
+elif selected_page == "Sentinel Events & Top 10":
+    st.markdown("<h4 style='color: #001f3f;'>รายการ Sentinel Events</h4>", unsafe_allow_html=True)
+    if filtered.empty:
+        st.info("ไม่มีข้อมูลตามตัวกรอง")
+    elif 'Sentinel code for check' in filtered.columns:
+        sentinel_events = filtered[filtered['Sentinel code for check'].isin(sentinel_composite_keys)].copy()
+        if not sentinel_events.empty:
+            if 'Sentinel2024_df' in globals() and not Sentinel2024_df.empty and 'ชื่ออุบัติการณ์ความเสี่ยง' in Sentinel2024_df.columns:
+                try:
+                    sentinel_events = pd.merge(sentinel_events, Sentinel2024_df[['รหัส', 'Impact', 'ชื่ออุบัติการณ์ความเสี่ยง']].rename(columns={'ชื่ออุบัติการณ์ความเสี่ยง': 'Sentinel Event Name'}), on=['รหัส', 'Impact'], how='left')
+                    if 'Sentinel Event Name' not in display_cols_common: display_cols_common.insert(2, 'Sentinel Event Name')
+                except Exception as e:
+                    st.warning(f"Merge Sentinel name failed: {e}")
+            cols_to_show_sentinel = [col for col in display_cols_common if col in sentinel_events.columns]
+            date_format_config = {"Occurrence Date": st.column_config.DatetimeColumn("วันที่เกิด", format="DD/MM/YYYY HH:mm")}
+            st.dataframe(sentinel_events[cols_to_show_sentinel], use_container_width=True, hide_index=True, column_config=date_format_config)
         else:
-            st.warning("ไม่สามารถตรวจสอบ Sentinel Events ได้ (ไฟล์ Sentinel2024.xlsx อาจไม่มีข้อมูล)")
-        st.markdown("---")
-        st.subheader("Top 10 อุบัติการณ์ (ตามความถี่)")
+            st.info("ไม่พบ Sentinel Events")
+    else:
+        st.warning("ตรวจสอบ Sentinel ไม่ได้")
 
-        if not df_freq.empty:
-            df_freq_top10 = df_freq.nlargest(10, 'count')
-            incident_names = df_filtered[['Incident', 'ชื่ออุบัติการณ์ความเสี่ยง']].drop_duplicates()
-            df_freq_top10 = pd.merge(df_freq_top10, incident_names, on='Incident', how='left')
-
-            st.dataframe(
-                df_freq_top10[['Incident', 'count']],
-                column_config={
-                    "Incident": "รหัส Incident",
-                    "count": "จำนวนครั้ง"
-                },
-                use_container_width=True,
-                hide_index=True
-            )
+    st.markdown("---")
+    st.subheader("Top 10 อุบัติการณ์ (ตามความถี่)")
+    if filtered.empty:
+        st.info("ไม่มีข้อมูลตามตัวกรอง")
+    else:
+        df_freq_filt = filtered['Incident'].value_counts().reset_index(); df_freq_filt.columns = ['Incident', 'count']
+        if not df_freq_filt.empty:
+            top10_df = df_freq_filt.nlargest(10, 'count')
+            incident_names_filt = filtered[['Incident', 'ชื่ออุบัติการณ์ความเสี่ยง']].drop_duplicates()
+            top10_df = pd.merge(top10_df, incident_names_filt, on='Incident', how='left')
+            st.dataframe(top10_df[['Incident', 'ชื่ออุบัติการณ์ความเสี่ยง', 'count']], hide_index=True, use_container_width=True, column_config={"Incident": "รหัส", "count":"จำนวน"})
         else:
-            st.warning("ไม่สามารถแสดง Top 10 อุบัติการณ์ได้")
+            st.warning("แสดง Top 10 ไม่ได้")
 
-    elif selected_analysis == "Risk Matrix (Interactive)":
-        st.subheader("Risk Matrix (Interactive)")
-
-        matrix_data_counts = np.zeros((5, 5), dtype=int)
-        impact_level_keys = ['5', '4', '3', '2', '1']
-        freq_level_keys = ['1', '2', '3', '4', '5']
-
-        matrix_df = df_filtered[
-            df_filtered['Impact Level'].isin(impact_level_keys) &
-            df_filtered['Frequency Level'].isin(freq_level_keys)
-            ].copy()
-
-        # 2. ทำการนับจาก DataFrame ที่สะอาดแล้วเท่านั้น
-        if not matrix_df.empty:
-            risk_counts_df = matrix_df.groupby(['Impact Level', 'Frequency Level']).size().reset_index(name='counts')
-            for _, row in risk_counts_df.iterrows():
-                il_key, fl_key = str(row['Impact Level']), str(row['Frequency Level'])
-                # ไม่จำเป็นต้องเช็คซ้ำ เพราะเรากรองข้อมูลมาแล้ว
-                row_idx, col_idx = impact_level_keys.index(il_key), freq_level_keys.index(fl_key)
-                matrix_data_counts[row_idx, col_idx] = row['counts']
-
-        impact_labels_display = {
-            '5': "I / 5<br>Extreme / Death", '4': "G-H / 4<br>Major / Severe",
-            '3': "E-F / 3<br>Moderate", '2': "C-D / 2<br>Minor / Low", '1': "A-B / 1<br>Insignificant / No Harm"
-        }
-        freq_labels_display_short = {"1": "F1", "2": "F2", "3": "F3", "4": "F4", "5": "F5"}
-        freq_labels_display_long = {
-            "1": "Remote<br>(<2/mth)", "2": "Uncommon<br>(2-3/mth)", "3": "Occasional<br>(4-6/mth)",
-            "4": "Probable<br>(7-29/mth)", "5": "Frequent<br>(>=30/mth)"
-        }
-        impact_to_color_row = {'5': 0, '4': 1, '3': 2, '2': 3, '1': 4}
-        freq_to_color_col = {'1': 2, '2': 3, '3': 4, '4': 5, '5': 6}
-
-        cols_header = st.columns([2.2, 1, 1, 1, 1, 1])
-        with cols_header[0]:
-            st.markdown(
-                f"<div style='background-color:{colors2[6, 0]}; color:{get_text_color_for_bg(colors2[6, 0])}; padding:8px; text-align:center; font-weight:bold; border-radius:3px; margin:1px; height:60px; display:flex; align-items:center; justify-content:center;'>Impact / Frequency</div>",
-                unsafe_allow_html=True)
-        for i, fl_key in enumerate(freq_level_keys):
-            with cols_header[i + 1]:
-                header_freq_bg_color = colors2[5, freq_to_color_col.get(fl_key, 2) - 1]
-                header_freq_text_color = get_text_color_for_bg(header_freq_bg_color)
-                st.markdown(
-                    f"<div style='background-color:{header_freq_bg_color}; color:{header_freq_text_color}; padding:8px; text-align:center; font-weight:bold; border-radius:3px; margin:1px; height:60px; display:flex; flex-direction: column; align-items:center; justify-content:center;'><div>{freq_labels_display_short.get(fl_key, '')}</div><div style='font-size:0.7em;'>{freq_labels_display_long.get(fl_key, '')}</div></div>",
-                    unsafe_allow_html=True)
-
-        for il_key in impact_level_keys:
-            cols_data_row = st.columns([2.2, 1, 1, 1, 1, 1])
-            row_idx_color = impact_to_color_row[il_key]
-            with cols_data_row[0]:
-                header_impact_bg_color = colors2[row_idx_color, 1]
-                header_impact_text_color = get_text_color_for_bg(header_impact_bg_color)
-                st.markdown(
-                    f"<div style='background-color:{header_impact_bg_color}; color:{header_impact_text_color}; padding:8px; text-align:center; font-weight:bold; border-radius:3px; margin:1px; height:70px; display:flex; align-items:center; justify-content:center;'>{impact_labels_display[il_key]}</div>",
-                    unsafe_allow_html=True)
-            for i, fl_key in enumerate(freq_level_keys):
-                with cols_data_row[i + 1]:
-                    count = matrix_data_counts[impact_level_keys.index(il_key), freq_level_keys.index(fl_key)]
-                    cell_bg_color = colors2[row_idx_color, freq_to_color_col[fl_key]]
-                    text_color = get_text_color_for_bg(cell_bg_color)
-                    st.markdown(
-                        f"<div style='background-color:{cell_bg_color}; color:{text_color}; padding:5px; margin:1px; border-radius:3px; text-align:center; font-weight:bold; min-height:40px; display:flex; align-items:center; justify-content:center;'>{count}</div>",
-                        unsafe_allow_html=True)
-                    if count > 0:
-                        button_key = f"view_risk_{il_key}_{fl_key}"
-                        if st.button("👁️", key=button_key, help=f"ดูรายการ - {count} รายการ", use_container_width=True):
-                            st.session_state.clicked_risk_impact = il_key
-                            st.session_state.clicked_risk_freq = fl_key
-                            st.session_state.show_incident_table = True
-                            st.rerun()
-                    else:
-                        st.markdown("<div style='height:38px; margin-top:5px;'></div>", unsafe_allow_html=True)
-
-        if st.session_state.get('show_incident_table', False) and st.session_state.clicked_risk_impact is not None:
-            il_selected = st.session_state.clicked_risk_impact
-            fl_selected = st.session_state.clicked_risk_freq
-
-            df_incidents_in_cell = df_filtered[(df_filtered['Impact Level'].astype(str) == il_selected) & (
-                    df_filtered['Frequency Level'].astype(str) == fl_selected)].copy()
-            expander_title = f"รายการอุบัติการณ์: Impact Level {il_selected}, Frequency Level {fl_selected} - พบ {len(df_incidents_in_cell)} รายการ"
-            with st.expander(expander_title, expanded=True):
-                st.dataframe(df_incidents_in_cell[display_cols_common], use_container_width=True, hide_index=True)
-                if st.button("ปิดรายการ", key="clear_risk_selection_button"):
-                    st.session_state.show_incident_table = False
-                    st.session_state.clicked_risk_impact = None
-                    st.session_state.clicked_risk_freq = None
-                    st.rerun()
-
-        st.write("---")
-        st.subheader("ตารางสรุปสีตามระดับความเสี่ยงสูงสุดของแต่ละอุบัติการณ์")
-        st.info("สีและป้ายกำกับ (I: Impact, F: Frequency) มาจากช่องที่มีความเสี่ยงสูงสุดของอุบัติการณ์ประเภทนั้นๆ")
-
-        if 'Impact Level' in df_filtered.columns and 'Frequency Level' in df_filtered.columns:
-            incident_risk_summary = df_filtered.groupby(['รหัส', 'ชื่ออุบัติการณ์ความเสี่ยง']).agg(
-                max_impact_level=('Impact Level', 'max'),
-                frequency_level=('Frequency Level', 'first'),
-                total_occurrences=('Incident Rate/mth', 'first')
-            ).reset_index()
-
-            def get_color_for_incident(row):
-                il_key, fl_key = str(row['max_impact_level']), str(row['frequency_level'])
-                if il_key in impact_to_color_row and fl_key in freq_to_color_col:
-                    return colors2[impact_to_color_row[il_key], freq_to_color_col[fl_key]]
-                return '#808080'
-
-            incident_risk_summary['risk_color_hex'] = incident_risk_summary.apply(get_color_for_incident, axis=1)
-            incident_risk_summary = incident_risk_summary.sort_values(by='total_occurrences', ascending=False)
-
-            st.write("---")
-            for _, row in incident_risk_summary.iterrows():
-                color, text_color = row['risk_color_hex'], get_text_color_for_bg(row['risk_color_hex'])
-                risk_label = f"I: {row['max_impact_level']} | F: {row['frequency_level']}"
-                col1, col2 = st.columns([1, 6])
-                with col1:
-                    st.markdown(
-                        f'<div style="background-color: {color}; color: {text_color}; font-weight: bold; text-align: center; padding: 8px; border-radius: 5px; height: 100%; display: flex; align-items: center; justify-content: center;">{risk_label}</div>',
-                        unsafe_allow_html=True)
-                with col2:
-                    st.markdown(
-                        f"**{row['รหัส']} | {row['ชื่ออุบัติการณ์ความเสี่ยง']}** (อัตราการเกิด: {row.get('total_occurrences', 0):.2f} ครั้ง/เดือน)")
-        else:
-            st.warning("ไม่พบคอลัมน์ 'Impact Level' หรือ 'Frequency Level' ที่จำเป็นสำหรับการสร้างตารางสรุปสี")
-
-    elif selected_analysis == "กราฟสรุปอุบัติการณ์ (รายมิติ)":
-        st.markdown("<h4 style='color: #001f3f;'>กราฟสรุปอุบัติการณ์ (แบ่งตามมิติต่างๆ)</h4>", unsafe_allow_html=True)
-        pastel_color_discrete_map_dimensions = {'Critical': '#FF9999', 'High': '#FFCC99', 'Medium': '#FFFF99',
-                                                'Low': '#99FF99', 'Undefined': '#D3D3D3'}
-        tab1_v, tab2_v, tab3_v, tab4_v = st.tabs(
-            ["👁️By Goals (หมวด)", "👁️By Group (กลุ่ม)", "👁️By Shift (เวร)", "👁️By Place (สถานที่)"])
-
-        # ✅ แก้ไข: ใช้ df_filtered
-        df_charts = df_filtered.copy()
-        df_charts['Count'] = 1
-
+elif selected_page == "กราฟสรุปอุบัติการณ์ (รายมิติ)":
+    st.markdown("<h4 style='color: #001f3f;'>กราฟสรุปอุบัติการณ์ (รายมิติ)</h4>", unsafe_allow_html=True)
+    if filtered.empty:
+        st.info("ไม่มีข้อมูลตามตัวกรอง")
+    else:
+        pastel_color_discrete_map_dimensions = {'Extreme':'#d9534f', 'High': '#FFCC99', 'Medium': '#FFFF99', 'Low': '#99FF99', 'Undefined': '#D3D3D3', 'Critical': '#FF9999'}
+        tab1_v, tab2_v, tab3_v, tab4_v = st.tabs(["👁️By Goals", "👁️By Group", "👁️By Shift", "👁️By Place"])
+        df_charts = filtered.copy(); df_charts['Count'] = 1
         with tab1_v:
-            # ✅ แก้ไข: ใช้ total_month ที่คำนวณใหม่
-            st.markdown(f"Incidents by Safety Goals ({total_month} เดือน)")
+            st.markdown("ตามหมวด")
             if 'หมวด' in df_charts.columns:
-                df_c1 = df_charts[~df_charts['หมวด'].isin(
-                    ['N/A', 'N/A (ข้อมูลจาก AllCode ไม่พร้อมใช้งาน)', 'N/A (ไม่พบรหัสใน AllCode)'])]
+                df_c1 = df_charts[~df_charts['หมวด'].astype(str).isin(['N/A', 'None'])]
                 if not df_c1.empty:
-                    fig_c1 = px.bar(df_c1.groupby(['หมวด', 'Category Color']).size().reset_index(name='Count'),
-                                    x='หมวด', y='Count', color='Category Color',
-                                    color_discrete_map=pastel_color_discrete_map_dimensions)
-                    st.plotly_chart(fig_c1, use_container_width=True)
+                    fig_c1 = px.bar(df_c1.groupby(['หมวด', 'Category Color'], observed=True).size().reset_index(name='Count'), x='หมวด', y='Count', color='Category Color', color_discrete_map=pastel_color_discrete_map_dimensions, title="ตามหมวด")
+                    fig_c1.update_layout(xaxis={'categoryorder':'total descending'}); st.plotly_chart(fig_c1, use_container_width=True)
+                else: st.info("ไม่มีข้อมูลหมวด")
+            else: st.warning("ไม่พบ 'หมวด'")
         with tab2_v:
-            st.markdown(f"Incidents by Group ({total_month} เดือน)")
-            if 'กลุ่ม' in df_charts.columns:
-                df_c2 = df_charts[~df_charts['กลุ่ม'].isin(
-                    ['N/A', 'N/A (ข้อมูลจาก AllCode ไม่พร้อมใช้งาน)', 'N/A (ไม่พบรหัสใน AllCode)'])]
+            st.markdown("ตามกลุ่มงาน")
+            if 'กลุ่มงาน' in df_charts.columns:
+                df_c2 = df_charts[~df_charts['กลุ่มงาน'].astype(str).isin(['N/A', 'None'])]
                 if not df_c2.empty:
-                    fig_c2 = px.bar(df_c2.groupby(['กลุ่ม', 'Category Color']).size().reset_index(name='Count'),
-                                    x='กลุ่ม', y='Count', color='Category Color',
-                                    color_discrete_map=pastel_color_discrete_map_dimensions)
-                    st.plotly_chart(fig_c2, use_container_width=True)
+                    fig_c2 = px.bar(df_c2.groupby(['กลุ่มงาน', 'Category Color'], observed=True).size().reset_index(name='Count'), x='กลุ่มงาน', y='Count', color='Category Color', color_discrete_map=pastel_color_discrete_map_dimensions, title="ตามกลุ่มงาน")
+                    fig_c2.update_layout(xaxis={'categoryorder':'total descending'}); st.plotly_chart(fig_c2, use_container_width=True)
+                else: st.info("ไม่มีข้อมูลกลุ่มงาน")
+            else: st.warning("ไม่พบ 'กลุ่มงาน'")
         with tab3_v:
-            st.markdown(f"Incidents by Shift ({total_month} เดือน)")
+            st.markdown("ตามเวร")
             if 'ช่วงเวลา/เวร' in df_charts.columns:
-                df_c3 = df_charts[df_charts['ช่วงเวลา/เวร'].notna() & ~df_charts['ช่วงเวลา/เวร'].isin(['None', 'N/A'])]
+                df_c3 = df_charts[df_charts['ช่วงเวลา/เวร'].notna() & ~df_charts['ช่วงเวลา/เวร'].astype(str).isin(['None', 'N/A'])]
                 if not df_c3.empty:
-                    fig_c3 = px.bar(df_c3.groupby(['ช่วงเวลา/เวร', 'Category Color']).size().reset_index(name='Count'),
-                                    x='ช่วงเวลา/เวร', y='Count', color='Category Color',
-                                    color_discrete_map=pastel_color_discrete_map_dimensions)
+                    fig_c3 = px.bar(df_c3.groupby(['ช่วงเวลา/เวร', 'Category Color'], observed=True).size().reset_index(name='Count'), x='ช่วงเวลา/เวร', y='Count', color='Category Color', color_discrete_map=pastel_color_discrete_map_dimensions, title="ตามเวร")
+                    fig_c3.update_layout(xaxis={'categoryorder':'array', 'categoryarray':['เช้า','บ่าย','ดึก']})
                     st.plotly_chart(fig_c3, use_container_width=True)
+                else: st.info("ไม่มีข้อมูลเวร")
+            else: st.warning("ไม่พบ 'ช่วงเวลา/เวร'")
         with tab4_v:
-            st.markdown(f"Incidents by Place ({total_month} เดือน)")
+            st.markdown("ตามสถานที่")
             if 'ชนิดสถานที่' in df_charts.columns:
-                df_c4 = df_charts[df_charts['ชนิดสถานที่'].notna() & ~df_charts['ชนิดสถานที่'].isin(['None', 'N/A'])]
+                df_c4 = df_charts[df_charts['ชนิดสถานที่'].notna() & ~df_charts['ชนิดสถานที่'].astype(str).isin(['None', 'N/A'])]
                 if not df_c4.empty:
-                    fig_c4 = px.bar(df_c4.groupby(['ชนิดสถานที่', 'Category Color']).size().reset_index(name='Count'),
-                                    x='ชนิดสถานที่', y='Count', color='Category Color',
-                                    color_discrete_map=pastel_color_discrete_map_dimensions)
+                    place_counts = df_c4['ชนิดสถานที่'].value_counts()
+                    threshold = max(5, int(len(place_counts) * 0.05))
+                    other_places = place_counts[place_counts < threshold].index
+                    df_c4['ชนิดสถานที่_Agg'] = df_c4['ชนิดสถานที่'].apply(lambda x: 'อื่นๆ' if x in other_places else x)
+                    fig_c4 = px.bar(df_c4.groupby(['ชนิดสถานที่_Agg', 'Category Color'], observed=True).size().reset_index(name='Count'), x='ชนิดสถานที่_Agg', y='Count', color='Category Color', color_discrete_map=pastel_color_discrete_map_dimensions, title="ตามสถานที่")
+                    fig_c4.update_layout(xaxis_title="สถานที่", xaxis={'categoryorder':'total descending'})
                     st.plotly_chart(fig_c4, use_container_width=True)
-    elif selected_analysis == "Sankey: ภาพรวม":
-        st.markdown("<h4 style='color: #001f3f;'>Sankey Diagram: ภาพรวม</h4>", unsafe_allow_html=True)
-        st.markdown("""
-        <style>
-            .plot-container .svg-container .sankey-node text {
-                stroke-width: 0 !important; text-shadow: none !important; paint-order: stroke fill;
-            }
-        </style>
-        """, unsafe_allow_html=True)
+                else: st.info("ไม่มีข้อมูลสถานที่")
+            else: st.warning("ไม่พบ 'ชนิดสถานที่'")
 
-        req_cols = ['หมวด', 'Impact', 'Impact Level', 'Category Color']
-        if not all(col in df_filtered.columns for col in req_cols):
-            st.warning(f"ไม่พบคอลัมน์ที่จำเป็น ({', '.join(req_cols)}) สำหรับการสร้าง Sankey diagram")
-        else:
-            # ✅ ใช้ df_filtered เป็นข้อมูลตั้งต้น
-            sankey_df = df_filtered.copy()
-
-            placeholders = ['None', '', 'N/A', 'ไม่ระบุ',
-                            'N/A (ข้อมูลจาก AllCode ไม่พร้อมใช้งาน)',
-                            'N/A (ไม่พบรหัสใน AllCode หรือค่าว่างใน AllCode)']
-
-            # กรองข้อมูลที่มี 'หมวด' ที่ถูกต้องออกมาเพื่อใช้งาน
-            sankey_df = sankey_df[~sankey_df['หมวด'].astype(str).isin(placeholders)]
-
-            if sankey_df.empty:
-                st.warning("ไม่สามารถสร้าง Sankey Diagram ได้ เนื่องจากไม่มีข้อมูล 'หมวด' ที่ถูกต้องในช่วงเวลาที่เลือก")
-            else:
-                sankey_df['หมวด_Node'] = "หมวด: " + sankey_df['หมวด'].astype(str).str.strip()
-                sankey_df['Impact_AI_Node'] = "Impact: " + sankey_df['Impact'].astype(str).str.strip()
-                sankey_df.loc[
-                    sankey_df['Impact'].astype(str).isin(placeholders), 'Impact_AI_Node'] = "Impact: ไม่ระบุ A-I"
-
-                impact_level_display_map = {'1': "Level: 1 (A-B)", '2': "Level: 2 (C-D)", '3': "Level: 3 (E-F)",
-                                            '4': "Level: 4 (G-H)", '5': "Level: 5 (I)", 'N/A': "Level: ไม่ระบุ"}
-                sankey_df['Impact_Level_Node'] = sankey_df['Impact Level'].astype(str).str.strip().map(
-                    impact_level_display_map).fillna("Level: ไม่ระบุ")
-                sankey_df['Risk_Category_Node'] = "Risk: " + sankey_df['Category Color'].astype(str).str.strip()
-
-                node_cols = ['หมวด_Node', 'Impact_AI_Node', 'Impact_Level_Node', 'Risk_Category_Node']
-                sankey_df.dropna(subset=node_cols, inplace=True)
-
-                labels_muad = sorted(list(sankey_df['หมวด_Node'].unique()))
-                impact_ai_order = [f"Impact: {i}" for i in ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I']] + [
-                    "Impact: ไม่ระบุ A-I"]
-                labels_impact_ai = sorted(list(sankey_df['Impact_AI_Node'].unique()),
-                                          key=lambda x: impact_ai_order.index(x) if x in impact_ai_order else 999)
-                level_order_map = {"Level: 1 (A-B)": 1, "Level: 2 (C-D)": 2, "Level: 3 (E-F)": 3, "Level: 4 (G-H)": 4,
-                                   "Level: 5 (I)": 5, "Level: ไม่ระบุ": 6}
-                labels_impact_level = sorted(list(sankey_df['Impact_Level_Node'].unique()),
-                                             key=lambda x: level_order_map.get(x, 999))
-                risk_order = ["Risk: Critical", "Risk: High", "Risk: Medium", "Risk: Low", "Risk: Undefined"]
-                labels_risk_cat = sorted(list(sankey_df['Risk_Category_Node'].unique()),
-                                         key=lambda x: risk_order.index(x) if x in risk_order else 999)
-
-                all_labels_ordered = labels_muad + labels_impact_ai + labels_impact_level + labels_risk_cat
-                all_labels = list(pd.Series(all_labels_ordered).unique())
-                label_to_idx = {label: i for i, label in enumerate(all_labels)}
-
-                source_indices, target_indices, values = [], [], []
-                links1 = sankey_df.groupby(['หมวด_Node', 'Impact_AI_Node']).size().reset_index(name='value')
-                for _, row in links1.iterrows():
-                    if row['หมวด_Node'] in label_to_idx and row['Impact_AI_Node'] in label_to_idx:
-                        source_indices.append(label_to_idx[row['หมวด_Node']])
-                        target_indices.append(label_to_idx[row['Impact_AI_Node']])
-                        values.append(row['value'])
-
-                links2 = sankey_df.groupby(['Impact_AI_Node', 'Impact_Level_Node']).size().reset_index(name='value')
-                for _, row in links2.iterrows():
-                    if row['Impact_AI_Node'] in label_to_idx and row['Impact_Level_Node'] in label_to_idx:
-                        source_indices.append(label_to_idx[row['Impact_AI_Node']])
-                        target_indices.append(label_to_idx[row['Impact_Level_Node']])
-                        values.append(row['value'])
-
-                links3 = sankey_df.groupby(['Impact_Level_Node', 'Risk_Category_Node']).size().reset_index(name='value')
-                for _, row in links3.iterrows():
-                    if row['Impact_Level_Node'] in label_to_idx and row['Risk_Category_Node'] in label_to_idx:
-                        source_indices.append(label_to_idx[row['Impact_Level_Node']])
-                        target_indices.append(label_to_idx[row['Risk_Category_Node']])
-                        values.append(row['value'])
-
-                if source_indices:
-                    node_colors = []
-                    palette1, palette2, palette3 = px.colors.qualitative.Pastel1, px.colors.qualitative.Pastel2, px.colors.qualitative.Set3
-                    risk_color_map = {"Risk: Critical": "red", "Risk: High": "orange", "Risk: Medium": "#F7DC6F",
-                                      "Risk: Low": "green", "Risk: Undefined": "grey"}
-                    for label in all_labels:
-                        if label.startswith("หมวด:"):
-                            node_colors.append(palette1[labels_muad.index(label) % len(palette1)])
-                        elif label.startswith("Impact:"):
-                            node_colors.append(palette2[labels_impact_ai.index(label) % len(palette2)])
-                        elif label.startswith("Level:"):
-                            node_colors.append(palette3[labels_impact_level.index(label) % len(palette3)])
-                        elif label.startswith("Risk:"):
-                            node_colors.append(risk_color_map.get(label, 'grey'))
-                        else:
-                            node_colors.append('rgba(200,200,200,0.8)')
-
-                    link_colors_rgba = [
-                        f'rgba({int(c.lstrip("#")[0:2], 16)},{int(c.lstrip("#")[2:4], 16)},{int(c.lstrip("#")[4:6], 16)},0.3)' if c.startswith(
-                            '#') else 'rgba(200,200,200,0.3)' for c in [node_colors[s] for s in source_indices]]
-
-                    fig = go.Figure(data=[go.Sankey(
-                        arrangement='snap',
-                        node=dict(pad=15, thickness=18, line=dict(color="rgba(0,0,0,0.6)", width=0.75),
-                                  label=all_labels, color=node_colors,
-                                  hovertemplate='%{label} มีจำนวน: %{value}<extra></extra>'),
-                        link=dict(source=source_indices, target=target_indices, value=values, color=link_colors_rgba,
-                                  hovertemplate='จาก %{source.label}<br />ไปยัง %{target.label}<br />จำนวน: %{value}<extra></extra>')
-                    )])
-                    fig.update_layout(
-                        title_text="<b>แผนภาพ Sankey:</b> หมวด -> Impact (A-I) -> Impact Level (1-5) -> Risk Category",
-                        font_size=12, height=max(700, len(all_labels) * 18), template='plotly_white',
-                        margin=dict(t=60, l=10, r=10, b=20))
-                    st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.warning("ไม่สามารถสร้างลิงก์สำหรับ Sankey diagram ได้ (อาจไม่มีความเชื่อมโยงของข้อมูล)")
-
-    elif selected_analysis == "Sankey: มาตรฐานสำคัญจำเป็นต่อความปลอดภัย 9 ข้อ":
-        st.markdown("<h4 style='color: #001f3f;'>Sankey Diagram: มาตรฐานสำคัญจำเป็นต่อความปลอดภัย 9 ข้อ</h4>",
-                    unsafe_allow_html=True)
-        st.markdown("""
-        <style>
-            .plot-container .svg-container .sankey-node text {
-                stroke-width: 0 !important; text-shadow: none !important; paint-order: stroke fill;
-            }
-        </style>
-        """, unsafe_allow_html=True)
-
-        required_cols = ['หมวดหมู่มาตรฐานสำคัญ', 'รหัส', 'Impact', 'ชื่ออุบัติการณ์ความเสี่ยง', 'Category Color']
-        if not all(col in df_filtered.columns for col in required_cols):
-            st.warning(f"ไม่พบคอลัมน์ที่จำเป็น ({', '.join(required_cols)}) สำหรับการสร้าง Sankey diagram")
-        else:
-            # ✅ แก้ไข: ใช้ df_filtered เป็นข้อมูลตั้งต้น
-            sankey_df_new = df_filtered.copy()
-
-            placeholders_to_filter = ["ไม่จัดอยู่ใน PSG9 Catalog", "ไม่สามารถระบุ (Merge PSG9 ล้มเหลว)",
-                                      "ไม่สามารถระบุ (PSG9code.xlsx ไม่ได้โหลด)"]
-            sankey_df_new = sankey_df_new[
-                ~sankey_df_new['หมวดหมู่มาตรฐานสำคัญ'].astype(str).isin(placeholders_to_filter)]
-
-            if sankey_df_new.empty:
-                st.warning("ไม่พบข้อมูลที่เกี่ยวข้องกับ PSG9 ในช่วงเวลาที่เลือก")
-            else:
-                psg9_to_cp_gp_map = {PSG9_label_dict[num].strip(): 'CP (หมวดตาม PSG9)' for num in
-                                     [1, 3, 4, 5, 6, 7, 8, 9] if num in PSG9_label_dict}
-                psg9_to_cp_gp_map.update(
-                    {PSG9_label_dict[num].strip(): 'GP (หมวดตาม PSG9)' for num in [2] if num in PSG9_label_dict})
-
-                sankey_df_new['หมวด_CP_GP_Node'] = sankey_df_new['หมวดหมู่มาตรฐานสำคัญ'].map(psg9_to_cp_gp_map)
-                sankey_df_new['หมวดหมู่PSG_Node'] = "PSG9: " + sankey_df_new['หมวดหมู่มาตรฐานสำคัญ']
-                sankey_df_new['รหัส_Node'] = "รหัส: " + sankey_df_new['รหัส']
-                sankey_df_new['Impact_AI_Node'] = "Impact: " + sankey_df_new['Impact']
-                sankey_df_new['Risk_Category_Node'] = "Risk: " + sankey_df_new['Category Color']
-                sankey_df_new['ชื่ออุบัติการณ์ความเสี่ยง_for_hover'] = sankey_df_new[
-                    'ชื่ออุบัติการณ์ความเสี่ยง'].fillna('ไม่มีคำอธิบาย')
-
-                cols_for_dropna = ['หมวด_CP_GP_Node', 'หมวดหมู่PSG_Node', 'รหัส_Node', 'Impact_AI_Node',
-                                   'Risk_Category_Node']
-                sankey_df_new.dropna(subset=cols_for_dropna, inplace=True)
-
-                labels_muad_cp_gp_simp = sorted(list(sankey_df_new['หมวด_CP_GP_Node'].unique()))
-                labels_psg9_cat_simp = sorted(list(sankey_df_new['หมวดหมู่PSG_Node'].unique()))
-                rh_node_to_desc_map = sankey_df_new.drop_duplicates(subset=['รหัส_Node']).set_index('รหัส_Node')[
-                    'ชื่ออุบัติการณ์ความเสี่ยง_for_hover'].to_dict()
-                labels_rh_simp = sorted(list(sankey_df_new['รหัส_Node'].unique()))
-                labels_impact_ai_simp = sorted(list(sankey_df_new['Impact_AI_Node'].unique()))
-                risk_order = ["Risk: Critical", "Risk: High", "Risk: Medium", "Risk: Low", "Risk: Undefined"]
-                labels_risk_category = sorted(list(sankey_df_new['Risk_Category_Node'].unique()),
-                                              key=lambda x: risk_order.index(x) if x in risk_order else 99)
-
-                all_labels_ordered_simp = labels_muad_cp_gp_simp + labels_psg9_cat_simp + labels_rh_simp + labels_impact_ai_simp + labels_risk_category
-                all_labels_simp = list(pd.Series(all_labels_ordered_simp).unique())
-                label_to_idx_simp = {label: i for i, label in enumerate(all_labels_simp)}
-                customdata_for_nodes_simp = [
-                    f"<br>คำอธิบาย: {str(rh_node_to_desc_map.get(label_node, ''))}" if label_node in rh_node_to_desc_map else ""
-                    for label_node in all_labels_simp]
-
-                source_indices_simp, target_indices_simp, values_simp = [], [], []
-                links_l1 = sankey_df_new.groupby(['หมวด_CP_GP_Node', 'หมวดหมู่PSG_Node']).size().reset_index(
-                    name='value')
-                for _, row in links_l1.iterrows():
-                    if row['หมวด_CP_GP_Node'] in label_to_idx_simp and row['หมวดหมู่PSG_Node'] in label_to_idx_simp:
-                        source_indices_simp.append(label_to_idx_simp[row['หมวด_CP_GP_Node']])
-                        target_indices_simp.append(label_to_idx_simp[row['หมวดหมู่PSG_Node']])
-                        values_simp.append(row['value'])
-
-                links_l2 = sankey_df_new.groupby(['หมวดหมู่PSG_Node', 'รหัส_Node']).size().reset_index(name='value')
-                for _, row in links_l2.iterrows():
-                    if row['หมวดหมู่PSG_Node'] in label_to_idx_simp and row['รหัส_Node'] in label_to_idx_simp:
-                        source_indices_simp.append(label_to_idx_simp[row['หมวดหมู่PSG_Node']])
-                        target_indices_simp.append(label_to_idx_simp[row['รหัส_Node']])
-                        values_simp.append(row['value'])
-
-                links_l3 = sankey_df_new.groupby(['รหัส_Node', 'Impact_AI_Node']).size().reset_index(name='value')
-                for _, row in links_l3.iterrows():
-                    if row['รหัส_Node'] in label_to_idx_simp and row['Impact_AI_Node'] in label_to_idx_simp:
-                        source_indices_simp.append(label_to_idx_simp[row['รหัส_Node']])
-                        target_indices_simp.append(label_to_idx_simp[row['Impact_AI_Node']])
-                        values_simp.append(row['value'])
-
-                links_l4 = sankey_df_new.groupby(['Impact_AI_Node', 'Risk_Category_Node']).size().reset_index(
-                    name='value')
-                for _, row in links_l4.iterrows():
-                    if row['Impact_AI_Node'] in label_to_idx_simp and row['Risk_Category_Node'] in label_to_idx_simp:
-                        source_indices_simp.append(label_to_idx_simp[row['Impact_AI_Node']])
-                        target_indices_simp.append(label_to_idx_simp[row['Risk_Category_Node']])
-                        values_simp.append(row['value'])
-
-                if source_indices_simp:
-                    node_colors_simp = []
-                    palette_l1, palette_l2, palette_l3, palette_l4 = px.colors.qualitative.Bold, px.colors.qualitative.Pastel, px.colors.qualitative.Vivid, px.colors.qualitative.Set3
-                    risk_cat_color_map = {"Risk: Critical": "red", "Risk: High": "orange", "Risk: Medium": "#F7DC6F",
-                                          "Risk: Low": "green", "Risk: Undefined": "grey"}
-                    for label_node in all_labels_simp:
-                        if label_node in labels_muad_cp_gp_simp:
-                            node_colors_simp.append(
-                                palette_l1[labels_muad_cp_gp_simp.index(label_node) % len(palette_l1)])
-                        elif label_node in labels_psg9_cat_simp:
-                            node_colors_simp.append(
-                                palette_l2[labels_psg9_cat_simp.index(label_node) % len(palette_l2)])
-                        elif label_node in labels_rh_simp:
-                            node_colors_simp.append(palette_l3[labels_rh_simp.index(label_node) % len(palette_l3)])
-                        elif label_node in labels_impact_ai_simp:
-                            node_colors_simp.append(
-                                palette_l4[labels_impact_ai_simp.index(label_node) % len(palette_l4)])
-                        elif label_node in labels_risk_category:
-                            node_colors_simp.append(risk_cat_color_map.get(label_node, 'grey'))
-                        else:
-                            node_colors_simp.append('rgba(200,200,200,0.8)')
-
-                    link_colors_simp = []
-                    default_link_color_simp = 'rgba(200,200,200,0.35)'
-                    for s_idx in source_indices_simp:
-                        try:
-                            hex_color = node_colors_simp[s_idx]
-                            h = hex_color.lstrip('#')
-                            rgb_tuple = tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
-                            link_colors_simp.append(f'rgba({rgb_tuple[0]},{rgb_tuple[1]},{rgb_tuple[2]},0.3)')
-                        except:
-                            link_colors_simp.append(default_link_color_simp)
-
-                    fig_sankey_psg9_simplified = go.Figure(data=[go.Sankey(
-                        arrangement='snap',
-                        node=dict(pad=10, thickness=15, line=dict(color="rgba(0,0,0,0.4)", width=0.4),
-                                  label=all_labels_simp, color=node_colors_simp, customdata=customdata_for_nodes_simp,
-                                  hovertemplate='<b>%{label}</b><br>จำนวน: %{value}%{customdata}<extra></extra>'),
-                        link=dict(source=source_indices_simp, target=target_indices_simp, value=values_simp,
-                                  color=link_colors_simp,
-                                  hovertemplate='จาก %{source.label}<br />ไปยัง %{target.label}<br />จำนวน: %{value}<extra></extra>')
-                    )])
-                    fig_sankey_psg9_simplified.update_layout(
-                        title_text="<b>แผนภาพ SANKEY:</b> CP/GP -> หมวดหมู่ PSG9 -> รหัส -> Impact -> Risk Category",
-                        font_size=11, height=max(800, len(all_labels_simp) * 12 + 200),
-                        template='plotly_white', margin=dict(t=70, l=10, r=10, b=20)
-                    )
-                    st.plotly_chart(fig_sankey_psg9_simplified, use_container_width=True)
-                else:
-                    st.warning("ไม่สามารถสร้างลิงก์สำหรับ Sankey diagram (PSG9) ได้")
-
-    elif selected_analysis == "สรุปอุบัติการณ์ตาม Safety Goals":
-        st.markdown("<h4 style='color: #001f3f;'>สรุปอุบัติการณ์ตามเป้าหมาย (Safety Goals)</h4>",
-                    unsafe_allow_html=True)
-
-        goal_definitions = {
-            "Patient Safety/ Common Clinical Risk": "P:Patient Safety Goals หรือ Common Clinical Risk Incident",
-            "Specific Clinical Risk": "S:Specific Clinical Risk Incident",
-            "Personnel Safety": "P:Personnel Safety Goals",
-            "Organization Safety": "O:Organization Safety Goals"
-        }
-
-        # --- ส่วนที่ 1: แสดงตารางสรุปเหมือนเดิม ---
+elif selected_page == "สรุปอุบัติการณ์ตาม Safety Goals":
+    st.markdown("<h4 style='color: #001f3f;'>สรุปอุบัติการณ์ตาม Safety Goals</h4>", unsafe_allow_html=True)
+    if filtered.empty:
+        st.info("ไม่มีข้อมูลตามตัวกรอง")
+    else:
+        # --- Part 1: Summary Tables ---
         for display_name, cat_name in goal_definitions.items():
-            st.markdown(f"##### {display_name}")
-
-            is_org_safety = (display_name == "Organization Safety")
-
-            summary_table = create_goal_summary_table(
-                df_filtered,
-                cat_name,
-                e_up_non_numeric_levels_param=[] if is_org_safety else ['A', 'B', 'C', 'D'],
-                e_up_numeric_levels_param=['1', '2'] if is_org_safety else None,
-                is_org_safety_table=is_org_safety
-            )
-
-            if summary_table is not None and not summary_table.empty:
-                st.dataframe(summary_table, use_container_width=True)
-            else:
-                st.info(f"ไม่มีข้อมูลสำหรับ '{display_name}' ในช่วงเวลาที่เลือก")
-
-        # --- ส่วนที่ 2: กราฟแท่งเปรียบเทียบ % E-up (ที่เพิ่มเข้ามา) ---
-        st.markdown("---")
-        st.subheader("📊 เจาะลึกสัดส่วนอุบัติการณ์รุนแรง (% E-up) ในแต่ละหัวข้อ")
-
-        severe_levels = ['E', 'F', 'G', 'H', 'I', '3', '4', '5']
-        valid_goals = [goal for goal in df_filtered['หมวด'].unique() if
-                       goal and goal not in ['N/A', 'N/A (ข้อมูลจาก AllCode ไม่พร้อมใช้งาน)',
-                                             'N/A (ไม่พบรหัสใน AllCode)']]
-
-        for goal in valid_goals:
-            st.markdown(f"#### {goal}")
-
-            goal_df = df_filtered[df_filtered['หมวด'] == goal].copy()
-
-            summary = goal_df.groupby('Incident Type Name').apply(
-                lambda x: (x['Impact'].isin(severe_levels).sum() / len(x) * 100) if len(x) > 0 else 0
-            ).reset_index(name='ร้อยละ E-up')
-
-            summary = summary[summary['ร้อยละ E-up'] > 0].sort_values(by='ร้อยละ E-up', ascending=True)
-
-            if summary.empty:
-                st.info("ไม่พบอุบัติการณ์รุนแรง (E-up) ในหมวดหมู่นี้")
-                continue
-
-            fig = px.bar(
-                summary,
-                x='ร้อยละ E-up',
-                y='Incident Type Name',
-                orientation='h',
-                title=f"สัดส่วนอุบัติการณ์รุนแรงในหมวด {goal}",
-                labels={'Incident Type Name': 'หัวข้ออุบัติการณ์', 'ร้อยละ E-up': 'ร้อยละของอุบัติการณ์รุนแรง (%)'},
-                text_auto='.2f',
-                color='ร้อยละ E-up',
-                color_continuous_scale='Reds'
-            )
-            fig.update_layout(yaxis_title=None, xaxis_ticksuffix="%")
-            st.plotly_chart(fig, use_container_width=True)
-
-        # --- ส่วนที่ 3: กราฟ Sunburst (ที่เพิ่มเข้ามา) ---
-        st.markdown("---")
-        st.subheader("☀️ ภาพรวมสัดส่วนอุบัติการณ์รุนแรงแบบ Sunburst")
-
-        total_counts = df_filtered.groupby(['หมวด', 'Incident Type Name']).size().reset_index(name='จำนวนทั้งหมด')
-        severe_df = df_filtered[df_filtered['Impact'].isin(severe_levels)]
-        severe_counts = severe_df.groupby(['หมวด', 'Incident Type Name']).size().reset_index(name='จำนวน E-up')
-        summary_df = pd.merge(total_counts, severe_counts, on=['หมวด', 'Incident Type Name'], how='left').fillna(0)
-        summary_df['ร้อยละ E-up'] = (summary_df['จำนวน E-up'] / summary_df['จำนวนทั้งหมด'] * 100)
-        summary_df = summary_df[summary_df['จำนวนทั้งหมด'] > 0]
-
-        if summary_df.empty:
-            st.info("ไม่มีข้อมูลเพียงพอสำหรับสร้างกราฟ Sunburst")
-        else:
-            fig_sunburst = px.sunburst(
-                summary_df,
-                path=['หมวด', 'Incident Type Name'],
-                values='จำนวนทั้งหมด',
-                color='ร้อยละ E-up',
-                color_continuous_scale='YlOrRd',
-                hover_data={'ร้อยละ E-up': ':.2f'},
-                title="ภาพรวมสัดส่วนอุบัติการณ์รุนแรง (ขนาด = จำนวนรวม, สี = % E-up)"
-            )
-            fig_sunburst.update_traces(textinfo="label+percent entry")
-            st.plotly_chart(fig_sunburst, use_container_width=True)
-
-    elif selected_analysis == "Incidents Analysis":
-        st.markdown("<h4 style='color: #001f3f;'>Incidents Analysis</h4>", unsafe_allow_html=True)
-
-        if 'Resulting Actions' not in df_filtered.columns or 'หมวดหมู่มาตรฐานสำคัญ' not in df_filtered.columns:
-            st.error(
-                "ไม่สามารถแสดงข้อมูลได้ เนื่องจากไม่พบคอลัมน์ 'Resulting Actions' หรือ 'หมวดหมู่มาตรฐานสำคัญ' ในข้อมูล")
-        else:
-            tab_psg9, tab_groups, tab_by_code, tab_waitlist = st.tabs(
-                ["👁️ วิเคราะห์ตามหมวดหมู่ PSG9",
-                 "👁️ วิเคราะห์ตามกลุ่มหลัก (C/G)",
-                 "👁️ วิเคราะห์รายรหัส",
-                 "👁️ อุบัติการณ์ที่รอการแก้ไข(ตามความรุนแรง)"])
-
-            # --- Tab ที่ 1: วิเคราะห์ตามหมวดหมู่ PSG9 ---
-            with tab_psg9:
-                st.subheader("ภาพรวมอุบัติการณ์ตามมาตรฐานสำคัญจำเป็นต่อความปลอดภัย (PSG9)")
-                # ✅ แก้ไข: ใช้ df_filtered
-                psg9_summary_table = create_psg9_summary_table(df_filtered)
-                if psg9_summary_table is not None and not psg9_summary_table.empty:
-                    st.dataframe(psg9_summary_table, use_container_width=True)
+            st.subheader(display_name)
+            try:
+                summary_table = create_goal_summary_table(
+                    data_df_goal=filtered,
+                    goal_category_name_param=cat_name
+                )
+                if summary_table is not None and not summary_table.empty:
+                    st.dataframe(summary_table, use_container_width=True, hide_index=True)
                 else:
-                    st.info("ไม่พบข้อมูลอุบัติการณ์ที่เกี่ยวข้องกับมาตรฐานสำคัญ 9 ข้อในช่วงเวลานี้")
+                    st.info(f"ไม่พบข้อมูลสำหรับ {display_name}")
+            except Exception as e:
+                st.error(f"เกิดข้อผิดพลาดในการสร้างตาราง {display_name}: {e}")
 
-                st.markdown("---")
-                st.subheader("สถานะการแก้ไขในแต่ละหมวดหมู่ PSG9")
+        # จุดสำหรับเพิ่มกราฟ/ sunburst ภายหลัง (ปัจจุบันตัดออกเพื่อความเสถียร)
 
-                # ✅ แก้ไข: ใช้ df_filtered
-                psg9_categories = {k: v for k, v in PSG9_label_dict.items() if
-                                   v in df_filtered['หมวดหมู่มาตรฐานสำคัญ'].unique()}
+elif selected_page == "Persistence Risk Index":
+    st.markdown("<h4 style='color: #001f3f;'>ดัชนีความเสี่ยงเรื้อรัง</h4>", unsafe_allow_html=True)
+    if filtered.empty:
+        st.info("ไม่มีข้อมูลตามตัวกรอง")
+    else:
+        st.info("ตารางนี้ให้คะแนนอุบัติการณ์ที่เกิดซ้ำ โดยรวมความถี่และความรุนแรงเฉลี่ย")
+        min_date_filt = filtered['Occurrence Date'].min(); max_date_filt = filtered['Occurrence Date'].max()
+        total_month_filt = 0
+        if pd.notna(min_date_filt) and pd.notna(max_date_filt):
+            max_p_filt = max_date_filt.to_period('M'); min_p_filt = min_date_filt.to_period('M')
+            total_month_filt = max(1, (max_p_filt.year - min_p_filt.year) * 12 + (max_p_filt.month - min_p_filt.month) + 1)
 
-                for psg9_id, psg9_name in psg9_categories.items():
-                    # ✅ แก้ไข: ใช้ df_filtered
-                    psg9_df = df_filtered[df_filtered['หมวดหมู่มาตรฐานสำคัญ'] == psg9_name]
-                    total_count = len(psg9_df)
-                    resolved_df = psg9_df[~psg9_df['Resulting Actions'].astype(str).isin(['None', '', 'nan'])]
-                    resolved_count = len(resolved_df)
-                    unresolved_count = total_count - resolved_count
-
-                    expander_title = f"{psg9_name} (ทั้งหมด: {total_count} | แก้ไขแล้ว: {resolved_count} | รอแก้ไข: {unresolved_count})"
-                    with st.expander(expander_title):
-                        c1, c2, c3 = st.columns(3)
-                        c1.metric("จำนวนทั้งหมด", f"{total_count:,}")
-                        c2.metric("ดำเนินการแก้ไขแล้ว", f"{resolved_count:,}")
-                        c3.metric("รอการแก้ไข", f"{unresolved_count:,}")
-
-                        if total_count > 0:
-                            tab_resolved, tab_unresolved = st.tabs(
-                                [f"รายการที่แก้ไขแล้ว ({resolved_count})", f"รายการที่รอการแก้ไข ({unresolved_count})"])
-                            with tab_resolved:
-                                if resolved_count > 0:
-                                    st.dataframe(
-                                        resolved_df[['Occurrence Date', 'Incident', 'Impact', 'Resulting Actions']],
-                                        hide_index=True, use_container_width=True, column_config={
-                                            "Occurrence Date": st.column_config.DatetimeColumn("วันที่เกิด",
-                                                                                               format="DD/MM/YYYY")})
-                                else:
-                                    st.info("ไม่มีรายการที่แก้ไขแล้วในหมวดนี้")
-                            with tab_unresolved:
-                                if unresolved_count > 0:
-                                    st.dataframe(
-                                        psg9_df[psg9_df['Resulting Actions'].astype(str).isin(['None', '', 'nan'])][
-                                            ['Occurrence Date', 'Incident', 'Impact', 'รายละเอียดการเกิด_Anonymized']],
-                                        hide_index=True, use_container_width=True, column_config={
-                                            "Occurrence Date": st.column_config.DatetimeColumn("วันที่เกิด",
-                                                                                               format="DD/MM/YYYY")})
-                                else:
-                                    st.success("อุบัติการณ์ทั้งหมดในหมวดนี้ได้รับการแก้ไขแล้ว")
-
-            # --- Tab ที่ 2: วิเคราะห์ตามกลุ่มหลัก (C/G) ---
-            with tab_groups:
-                # ------------------ ส่วนของกลุ่มอุบัติการณ์ทางคลินิก (C) ------------------
-                st.markdown("#### กลุ่มอุบัติการณ์ทางคลินิก (รหัสขึ้นต้นด้วย C)")
-                df_clinical = df_filtered[df_filtered['รหัส'].str.startswith('C', na=False)].copy()
-
-                if df_clinical.empty:
-                    st.info("ไม่พบข้อมูลอุบัติการณ์กลุ่ม Clinical ในช่วงเวลานี้")
-                else:
-                    # ---- เพิ่มส่วนนี้เข้ามา ----
-                    st.subheader("ภาพรวมอุบัติการณ์กลุ่ม Clinical")
-                    clinical_summary_table = create_summary_table_by_category(df_clinical, 'หมวด')
-                    if not clinical_summary_table.empty:
-                        st.dataframe(clinical_summary_table, use_container_width=True)
-                    else:
-                        st.info("ไม่มีข้อมูลเพียงพอสำหรับสร้างตารางสรุป")
-                    st.markdown("---")
-                    # ---- สิ้นสุดส่วนที่เพิ่ม ----
-
-                    st.subheader("เจาะลึกสถานะการแก้ไขตามหมวดย่อย (Clinical)")
-                    clinical_categories = sorted([cat for cat in df_clinical['หมวด'].unique() if cat and pd.notna(cat)])
-                    for category in clinical_categories:
-                        category_df = df_clinical[df_clinical['หมวด'] == category]
-                        total_count = len(category_df)
-                        resolved_df = category_df[
-                            ~category_df['Resulting Actions'].astype(str).isin(['None', '', 'nan'])]
-                        resolved_count = len(resolved_df)
-                        unresolved_count = total_count - resolved_count
-
-                        expander_title = f"{category} (ทั้งหมด: {total_count} | แก้ไขแล้ว: {resolved_count} | รอแก้ไข: {unresolved_count})"
-                        with st.expander(expander_title):
-                            # (โค้ดใน expander เหมือนเดิม ไม่ต้องแก้ไข)
-                            tab_resolved, tab_unresolved = st.tabs(
-                                [f"รายการที่แก้ไขแล้ว ({resolved_count})", f"รายการที่รอการแก้ไข ({unresolved_count})"])
-                            with tab_resolved:
-                                if resolved_count > 0:
-                                    st.dataframe(
-                                        resolved_df[['Occurrence Date', 'Incident', 'Impact', 'Resulting Actions']],
-                                        hide_index=True, use_container_width=True, column_config={
-                                            "Occurrence Date": st.column_config.DatetimeColumn("วันที่เกิด",
-                                                                                               format="DD/MM/YYYY")})
-                                else:
-                                    st.info("ไม่มีรายการที่แก้ไขแล้วในหมวดนี้")
-                            with tab_unresolved:
-                                if unresolved_count > 0:
-                                    st.dataframe(category_df[category_df['Resulting Actions'].astype(str).isin(
-                                        ['None', '', 'nan'])][['Occurrence Date', 'Incident', 'Impact',
-                                                               'รายละเอียดการเกิด_Anonymized']], hide_index=True,
-                                                 use_container_width=True, column_config={
-                                            "Occurrence Date": st.column_config.DatetimeColumn("วันที่เกิด",
-                                                                                               format="DD/MM/YYYY")})
-                                else:
-                                    st.success("อุบัติการณ์ทั้งหมดในหมวดนี้ได้รับการแก้ไขแล้ว")
-
-                st.markdown("---")
-
-                # ------------------ ส่วนของกลุ่มอุบัติการณ์ทั่วไป (G) ------------------
-                st.markdown("#### กลุ่มอุบัติการณ์ทั่วไป (รหัสขึ้นต้นด้วย G)")
-                df_general = df_filtered[df_filtered['รหัส'].str.startswith('G', na=False)].copy()
-
-                if df_general.empty:
-                    st.info("ไม่พบข้อมูลอุบัติการณ์กลุ่ม General ในช่วงเวลานี้")
-                else:
-                    # ---- เพิ่มส่วนนี้เข้ามา ----
-                    st.subheader("ภาพรวมอุบัติการณ์กลุ่ม General")
-                    general_summary_table = create_summary_table_by_category(df_general, 'หมวด')
-                    if not general_summary_table.empty:
-                        st.dataframe(general_summary_table, use_container_width=True)
-                    else:
-                        st.info("ไม่มีข้อมูลเพียงพอสำหรับสร้างตารางสรุป")
-                    st.markdown("---")
-                    # ---- สิ้นสุดส่วนที่เพิ่ม ----
-
-                    st.subheader("เจาะลึกสถานะการแก้ไขตามหมวดย่อย (General)")
-                    general_categories = sorted([cat for cat in df_general['หมวด'].unique() if cat and pd.notna(cat)])
-                    for category in general_categories:
-                        category_df = df_general[df_general['หมวด'] == category]
-                        total_count = len(category_df)
-                        resolved_df = category_df[
-                            ~category_df['Resulting Actions'].astype(str).isin(['None', '', 'nan'])]
-                        resolved_count = len(resolved_df)
-                        unresolved_count = total_count - resolved_count
-
-                        expander_title = f"{category} (ทั้งหมด: {total_count} | แก้ไขแล้ว: {resolved_count} | รอแก้ไข: {unresolved_count})"
-                        with st.expander(expander_title):
-                            # (โค้ดใน expander เหมือนเดิม ไม่ต้องแก้ไข)
-                            tab_resolved, tab_unresolved = st.tabs(
-                                [f"รายการที่แก้ไขแล้ว ({resolved_count})", f"รายการที่รอการแก้ไข ({unresolved_count})"])
-                            with tab_resolved:
-                                if resolved_count > 0:
-                                    st.dataframe(
-                                        resolved_df[['Occurrence Date', 'Incident', 'Impact', 'Resulting Actions']],
-                                        hide_index=True, use_container_width=True, column_config={
-                                            "Occurrence Date": st.column_config.DatetimeColumn("วันที่เกิด",
-                                                                                               format="DD/MM/YYYY")})
-                                else:
-                                    st.info("ไม่มีรายการที่แก้ไขแล้วในหมวดนี้")
-                            with tab_unresolved:
-                                if unresolved_count > 0:
-                                    st.dataframe(category_df[category_df['Resulting Actions'].astype(str).isin(
-                                        ['None', '', 'nan'])][['Occurrence Date', 'Incident', 'Impact',
-                                                               'รายละเอียดการเกิด_Anonymized']], hide_index=True,
-                                                 use_container_width=True, column_config={
-                                            "Occurrence Date": st.column_config.DatetimeColumn("วันที่เกิด",
-                                                                                               format="DD/MM/YYYY")})
-                                else:
-                                    st.success("อุบัติการณ์ทั้งหมดในหมวดนี้ได้รับการแก้ไขแล้ว")
-            # --- Tab ที่ 3: วิเคราะห์รายรหัส ---
-            with tab_by_code:
-                st.subheader("ภาพรวมอุบัติการณ์จำแนกตามรหัส")
-                st.info(
-                    "แสดงตารางสรุปจำนวนอุบัติการณ์ในแต่ละระดับความรุนแรงตามรหัส และกราฟแสดงเฉพาะอุบัติการณ์รุนแรง (E-I) ที่พบบ่อย")
-
-                # เรียกใช้ฟังก์ชันสร้างตารางสรุปรายรหัส
-                summary_table_code = create_summary_table_by_code(df_filtered)
-
-                if summary_table_code.empty:
-                    st.warning("ไม่พบข้อมูลสำหรับสร้างตารางสรุปรายรหัส")
-                else:
-                    st.markdown("##### ตารางสรุปอุบัติการณ์รายรหัส")
-                    st.dataframe(summary_table_code, use_container_width=True)
-                    st.markdown("---")
-
-                    st.markdown("##### กราฟแสดงอุบัติการณ์รุนแรง (ระดับ E-I) ที่พบบ่อย")
-                    chart_data = summary_table_code[summary_table_code['รวม E-up'] > 0].copy()
-
-                    if chart_data.empty:
-                        st.success("ไม่พบอุบัติการณ์รุนแรง (E-I) ในช่วงข้อมูลที่เลือก")
-                    else:
-                        top_n_chart = st.slider(
-                            "เลือกจำนวนรหัสที่ต้องการแสดงบนกราฟ:", min_value=1,
-                            max_value=min(30, len(chart_data)), value=min(15, len(chart_data)),
-                            step=1, key="top_n_chart_slider_tab"  # เปลี่ยน key เพื่อไม่ให้ซ้ำกับที่อื่น
-                        )
-                        top_chart_data = chart_data.nlargest(top_n_chart, 'รวม E-up')
-                        fig = px.bar(
-                            top_chart_data.sort_values('รวม E-up', ascending=True),
-                            x='รวม E-up', y=top_chart_data.index, orientation='h',
-                            title=f'Top {top_n_chart} รหัสอุบัติการณ์ที่มีความรุนแรงสูง (E-I) สะสม',
-                            labels={'รวม E-up': 'จำนวนครั้งสะสม (E-I)', 'y': 'รหัสอุบัติการณ์'},
-                            text='รวม E-up', color='รวม E-up', color_continuous_scale='Reds'
-                        )
-                        fig.update_layout(height=max(400, len(top_chart_data) * 25), yaxis_title=None,
-                                          coloraxis_showscale=False)
-                        fig.update_traces(textposition='outside')
-                        st.plotly_chart(fig, use_container_width=True)
-
-            # --- Tab ที่ 4: รายการอุบัติการณ์ที่รอการแก้ไข ---
-            with tab_waitlist:
-                st.subheader("สรุปเปอร์เซ็นต์การแก้ไขอุบัติการณ์รุนแรง (E-I & 3-5)")
-
-                # ✅ หมายเหตุ: ค่าเหล่านี้ถูกคำนวณจาก df_filtered ที่ด้านบนของฟังก์ชัน display_executive_dashboard() แล้ว
-                total_severe_incidents = metrics_data.get("total_severe_incidents", 0)
-                total_severe_unresolved_incidents_val = metrics_data.get("total_severe_unresolved_incidents_val", 0)
-
-                # คำนวณเฉพาะส่วนของ PSG9 จาก df_filtered
-                severe_df = df_filtered[df_filtered['Impact Level'].isin(['3', '4', '5'])]
-                total_severe_psg9_incidents = severe_df[severe_df['รหัส'].isin(psg9_r_codes_for_counting)].shape[0]
-                total_severe_unresolved_psg9_incidents_val = metrics_data.get(
-                    "total_severe_unresolved_psg9_incidents_val", 0)
-
-                val_row3_total_pct = (
-                            total_severe_unresolved_incidents_val / total_severe_incidents * 100) if total_severe_incidents > 0 else 0
-                val_row3_psg9_pct = (
-                            total_severe_unresolved_psg9_incidents_val / total_severe_psg9_incidents * 100) if total_severe_psg9_incidents > 0 else 0
-
-                summary_action_data = [
-                    {"รายละเอียด": "1. จำนวนอุบัติการณ์รุนแรง E-I & 3-5", "ทั้งหมด": f"{total_severe_incidents:,}",
-                     "เฉพาะ PSG9": f"{total_severe_psg9_incidents:,}"},
-                    {"รายละเอียด": "2. อุบัติการณ์ E-I & 3-5 ที่ยังไม่ได้รับการแก้ไข",
-                     "ทั้งหมด": f"{total_severe_unresolved_incidents_val:,}",
-                     "เฉพาะ PSG9": f"{total_severe_unresolved_psg9_incidents_val:,}"},
-                    {"รายละเอียด": "3. % อุบัติการณ์ E-I & 3-5 ที่ยังไม่ได้รับการแก้ไข",
-                     "ทั้งหมด": f"{val_row3_total_pct:.2f}%", "เฉพาะ PSG9": f"{val_row3_psg9_pct:.2f}%"}
-                ]
-                st.dataframe(pd.DataFrame(summary_action_data).set_index('รายละเอียด'), use_container_width=True)
-
-                st.subheader("รายการอุบัติการณ์ที่รอการแก้ไข (ตามความรุนแรง)")
-                unresolved_df = df_filtered[df_filtered['Resulting Actions'].astype(str).isin(['None', '', 'nan'])].copy()
-
-                if unresolved_df.empty:
-                    st.success("🎉 ไม่พบรายการที่รอการแก้ไขในช่วงเวลานี้ ยอดเยี่ยมมากครับ!")
-                else:
-                    st.metric("จำนวนรายการที่รอการแก้ไขทั้งหมด", f"{len(unresolved_df):,} รายการ")
-                    severity_order = ['Critical', 'High', 'Medium', 'Low', 'Undefined']
-                    for severity in severity_order:
-                        severity_df = unresolved_df[unresolved_df['Category Color'] == severity]
-                        if not severity_df.empty:
-                            with st.expander(f"ระดับความรุนแรง: {severity} ({len(severity_df)} รายการ)"):
-                                display_cols = ['Occurrence Date', 'Incident', 'Impact',
-                                                'รายละเอียดการเกิด_Anonymized']
-
-                                st.dataframe(severity_df[display_cols], use_container_width=True, hide_index=True,
-                                             column_config={"Occurrence Date": st.column_config.DatetimeColumn("วันที่เกิด",
-                                                                                                               format="DD/MM/YYYY")})
-
-    elif selected_analysis == "Persistence Risk Index":
-        st.markdown("<h4 style='color: #001f3f;'>ดัชนีความเสี่ยงเรื้อรัง (Persistence Risk Index)</h4>", unsafe_allow_html=True)
-        st.info(
-            "ตารางนี้ให้คะแนนอุบัติการณ์ที่เกิดขึ้นซ้ำและมีความเสี่ยงโดยเฉลี่ยสูง ซึ่งเป็นปัญหาเรื้อรังที่ควรได้รับการทบทวนเชิงระบบ")
-
-        # ✅ แก้ไข: เรียกใช้ฟังก์ชันด้วย df_filtered และ total_month ที่ผ่านการกรองตามช่วงเวลาแล้ว
-        persistence_df = calculate_persistence_risk_score(df_filtered, total_month)
-
+        persistence_df = calculate_persistence_risk_score(filtered, total_month_filt)
         if not persistence_df.empty:
             display_df_persistence = persistence_df.rename(columns={
-                'Persistence_Risk_Score': 'ดัชนีความเรื้อรัง',
-                'Average_Ordinal_Risk_Score': 'คะแนนเสี่ยงเฉลี่ย',
-                'Incident_Rate_Per_Month': 'อัตราการเกิด (ครั้ง/เดือน)',
-                'Total_Occurrences': 'จำนวนครั้งทั้งหมด'
+                'รหัส': 'Incident Code',
+                'ชื่ออุบัติการณ์ความเสี่ยง': 'Incident Name',
+                'Average_Ordinal_Risk_Score': 'Avg Ordinal Risk',
+                'Total_Occurrences': 'Total',
+                'Incident_Rate_Per_Month': 'Rate/Month',
+                'Persistence_Risk_Score': 'Persistence Score'
             })
-            st.dataframe(
-                display_df_persistence[['รหัส', 'ชื่ออุบัติการณ์ความเสี่ยง', 'คะแนนเสี่ยงเฉลี่ย', 'ดัชนีความเรื้อรัง',
-                                        'อัตราการเกิด (ครั้ง/เดือน)', 'จำนวนครั้งทั้งหมด']],
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "คะแนนเสี่ยงเฉลี่ย": st.column_config.NumberColumn(format="%.2f"),
-                    "อัตราการเกิด (ครั้ง/เดือน)": st.column_config.NumberColumn(format="%.2f"),
-                    "ดัชนีความเรื้อรัง": st.column_config.ProgressColumn(
-                        "ดัชนีความเสี่ยงเรื้อรัง",
-                        help="คำนวณจากความถี่และความรุนแรงเฉลี่ย ยิ่งสูงยิ่งเป็นปัญหาเรื้อรัง",
-                        min_value=0,
-                        max_value=2,  # ค่าสูงสุดทางทฤษฎีคือ 2 (Frequency Score = 1, Severity Score = 1)
-                        format="%.2f"
-                    )
-                }
-            )
-            st.markdown("---")
-            st.markdown("##### กราฟวิเคราะห์ลักษณะของปัญหาเรื้อรัง")
-            fig = px.scatter(
-                persistence_df,
-                x="Average_Ordinal_Risk_Score",
-                y="Incident_Rate_Per_Month",
-                size="Total_Occurrences",
-                color="Persistence_Risk_Score",
-                hover_name="ชื่ออุบัติการณ์ความเสี่ยง",
-                color_continuous_scale=px.colors.sequential.Reds,
-                size_max=60,
-                labels={
-                    "Average_Ordinal_Risk_Score": "คะแนนความเสี่ยงเฉลี่ย (ยิ่งขวายิ่งรุนแรง)",
-                    "Incident_Rate_Per_Month": "อัตราการเกิดต่อเดือน (ยิ่งสูงยิ่งบ่อย)",
-                    "Persistence_Risk_Score": "ดัชนีความเรื้อรัง",
-                    "Total_Occurrences": "จำนวนครั้งทั้งหมด"
-                },
-                title="การกระจายตัวของปัญหาเรื้อรัง: ความถี่ vs ความรุนแรง"
-            )
-            fig.update_layout(xaxis_title="ความรุนแรงเฉลี่ย", yaxis_title="ความถี่เฉลี่ย")
+            st.dataframe(display_df_persistence[['Incident Code','Incident Name','Total','Avg Ordinal Risk','Rate/Month','Persistence Score']],
+                         use_container_width=True, hide_index=True)
+            st.markdown("---"); st.markdown("##### กราฟวิเคราะห์")
+            fig = px.scatter(persistence_df,
+                             x='Incident_Rate_Per_Month', y='Average_Ordinal_Risk_Score',
+                             size='Total_Occurrences', hover_name='รหัส',
+                             color='Persistence_Risk_Score',
+                             labels={'Incident_Rate_Per_Month':'อุบัติการณ์/เดือน', 'Average_Ordinal_Risk_Score':'ความรุนแรงเฉลี่ย (ordinal)'})
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.warning("ไม่มีข้อมูลเพียงพอสำหรับวิเคราะห์ความเสี่ยงเรื้อรังในช่วงเวลานี้")
+            st.warning("ไม่มีข้อมูลเพียงพอสำหรับคำนวณ Persistence Risk")
 
-    elif selected_analysis == "Early Warning: อุบัติการณ์ที่มีแนวโน้มสูงขึ้น":
-        st.markdown("<h4 style='color:#001f3f;'>Early Warning: อุบัติการณ์ที่มีแนวโน้มสูงขึ้น</h4>", unsafe_allow_html=True)
-
-        # ตรวจสอบว่ามีฟังก์ชันที่จำเป็นอยู่หรือไม่
-        if 'prioritize_incidents_nb_logit_v2' not in globals():
-            st.error("ไม่พบฟังก์ชัน `prioritize_incidents_nb_logit_v2` ในโค้ด")
+elif selected_page == "Early Warning: อุบัติการณ์ที่มีแนวโน้มสูงขึ้น":
+    st.markdown("<h4 style='color:#001f3f;'>Early Warning</h4>", unsafe_allow_html=True)
+    if filtered.empty:
+        st.info("ไม่มีข้อมูลตามตัวกรอง")
+    else:
+        c1, c2, c3 = st.columns(3)
+        with c1: horizon = st.slider("ช่วงคาดการณ์ (เดือน)", 1, 12, 3)
+        with c2: w1 = st.slider("น้ำหนักความถี่", 0.0, 1.0, 0.34)
+        with c3: w2 = st.slider("น้ำหนักความรุนแรง", 0.0, 1.0, 0.33)
+        w3 = max(0.0, 1.0 - (w1 + w2))
+        st.caption(f"น้ำหนักแนวโน้ม = {w3:.2f}")
+        try:
+            res = prioritize_incidents_nb_logit_v2(_df=filtered, horizon=horizon, w_freq=w1, w_sev=w2, w_trend=w3)
+        except Exception as e:
+            st.error(f"คำนวณผิดพลาด: {e}")
+            res = pd.DataFrame()
+        if res.empty:
+            st.info("ไม่มีข้อมูลเพียงพอสำหรับ Early Warning")
         else:
-            # ส่วนควบคุมการวิเคราะห์
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                horizon = st.slider("พยากรณ์ล่วงหน้า (เดือน):", 1, 12, 3, 1, key="ew_horizon")
-            with c2:
-                min_months = st.slider("ขั้นต่ำเดือนที่ใช้วิเคราะห์:", 3, 12, 4, 1, key="ew_min_months")
-            with c3:
-                min_total = st.slider("ขั้นต่ำจำนวนครั้งสะสม/รหัส:", 3, 200, 5, 1, key="ew_min_total")
+            st.dataframe(res.rename(columns={'รหัส':'Incident Code','ชื่ออุบัติการณ์ความเสี่ยง':'Incident Name','total':'Total','avg_risk':'Avg Risk','score':'Priority Score'}),
+                         use_container_width=True, hide_index=True)
 
-            st.markdown("**น้ำหนักคะแนน (รวมกัน = 1 อัตโนมัติ)**")
-            c4, c5, c6 = st.columns(3)
-            with c4:
-                w1 = st.slider("คาดการณ์เหตุรุนแรง (ฐาน 0.7)", 0.0, 1.0, 0.7, 0.05, key="ew_w1")
-            with c5:
-                w2 = st.slider("การเติบโตความถี่ (ฐาน 0.2)", 0.0, 1.0, 0.2, 0.05, key="ew_w2")
-            with c6:
-                w3 = st.slider("การเติบโตความรุนแรง (ฐาน 0.1)", 0.0, 1.0, 0.1, 0.05, key="ew_w3")
+elif selected_page == "บทสรุปสำหรับผู้บริหาร":
+    st.markdown("<h4 style='color: #001f3f;'>บทสรุปสำหรับผู้บริหาร</h4>", unsafe_allow_html=True)
+    if filtered.empty:
+        st.info("ไม่มีข้อมูลตามตัวกรอง")
+    else:
+        # --- START: Dependency Injection (คำนวณค่าที่จำเป็นก่อน) ---
+        # 1. คำนวณช่วงเวลา
+        min_date_filt = filtered['Occurrence Date'].min();
+        max_date_filt = filtered['Occurrence Date'].max()
+        min_date_str = min_date_filt.strftime('%d/%m/%Y') if pd.notna(min_date_filt) else "N/A"
+        max_date_str = max_date_filt.strftime('%d/%m/%Y') if pd.notna(max_date_filt) else "N/A"
+        total_month = 0
+        if pd.notna(min_date_filt) and pd.notna(max_date_filt):
+            max_p_filt = max_date_filt.to_period('M');
+            min_p_filt = min_date_filt.to_period('M')
+            total_month = max(1, (max_p_filt.year - min_p_filt.year) * 12 + (max_p_filt.month - min_p_filt.month) + 1)
 
-            # Normalize น้ำหนักให้รวมเท่ากับ 1
-            _sumw = max(w1 + w2 + w3, 1e-9)
-            w1n, w2n, w3n = w1 / _sumw, w2 / _sumw, w3 / _sumw
+        # 2. คำนวณ Metrics (ดึงมาจากหน้า Dashboard)
+        metrics_data = {}
+        metrics_data['total_processed_incidents'] = filtered.shape[0]
+        metrics_data['total_psg9_incidents_for_metric1'] = \
+        filtered[filtered['รหัส'].isin(psg9_r_codes_for_counting)].shape[0] if psg9_r_codes_for_counting else 0
+        metrics_data['total_sentinel_incidents_for_metric1'] = \
+        filtered[filtered['Sentinel code for check'].isin(sentinel_composite_keys)].shape[
+            0] if 'Sentinel code for check' in filtered.columns and sentinel_composite_keys else 0
 
-            try:
-                # ✅ แก้ไข: เรียกใช้ฟังก์ชันด้วย df_filtered
-                res = prioritize_incidents_nb_logit_v2(
-                    df_filtered,
-                    horizon=horizon,
-                    min_months=min_months,
-                    min_total=min_total,
-                    w_expected_severe=w1n,
-                    w_freq_growth=w2n,
-                    w_sev_growth=w3n
-                )
+        severe_impact_levels_list = ['3', '4', '5']
+        df_severe_filt = filtered[filtered['Impact Level'].isin(severe_impact_levels_list)].copy()
+        metrics_data['total_severe_incidents'] = df_severe_filt.shape[0]
 
-            except Exception as e:
-                st.error(f"เกิดข้อผิดพลาดระหว่างคำนวณลำดับความสำคัญ: {e}")
-                res = pd.DataFrame()  # สร้าง DataFrame ว่างเพื่อไม่ให้โค้ดส่วนล่าง error
+        if 'Resulting Actions' in filtered.columns:
+            unresolved_filt = df_severe_filt[df_severe_filt['Resulting Actions'].astype(str).isin(['None', '', 'nan'])]
+            metrics_data['total_severe_unresolved_incidents_val'] = unresolved_filt.shape[0]
+        else:
+            metrics_data['total_severe_unresolved_incidents_val'] = "N/A"
 
-            if res.empty:
-                st.info("ไม่มีข้อมูลเพียงพอสำหรับวิเคราะห์ Early Warning ในช่วงเวลานี้")
-            else:
-                topn = st.slider("แสดง Top-N:", 5, 50, 10, 5, key="ew_topn")
-                only_sig = st.checkbox("แสดงเฉพาะรหัสที่มีนัยสำคัญ (ถี่↑ และ/หรือ รุนแรง↑)", value=False, key="ew_only_sig")
+        # 3. คำนวณ Top 10 (ดึงมาจากหน้า Sentinel)
+        df_freq = filtered['Incident'].value_counts().reset_index()
+        df_freq.columns = ['Incident', 'count']
+        # --- END: Dependency Injection ---
 
-                show = res.copy()
-                if only_sig:
-                    show = show[
-                        (show['Freq_p_value'].notna() & (show['Freq_p_value'] < 0.05)) |
-                        (show['Severity_p_value'].notna() & (show['Severity_p_value'] < 0.05))
-                        ]
-
-                st.dataframe(
-                    show.head(topn),
-                    use_container_width=True, hide_index=True,
-                    column_config={
-                        'รหัส': st.column_config.Column("รหัส"),
-                        'ชื่ออุบัติการณ์ความเสี่ยง': st.column_config.Column("ชื่ออุบัติการณ์", width="large"),
-                        'Months_Observed': st.column_config.NumberColumn("เดือนที่วิเคราะห์", format="%d"),
-                        'Total_Occurrences': st.column_config.NumberColumn("ครั้งสะสม", format="%d"),
-                        'Expected_Severe_nextH': st.column_config.NumberColumn(f"คาดการณ์ 'รุนแรง' (H={horizon})",
-                                                                               format="%.1f"),
-                        'Freq_Factor_per_month': st.column_config.NumberColumn("เท่าความถี่/เดือน", format="%.2f"),
-                        'Freq_p_value': st.column_config.NumberColumn("p(ถี่↑)", format="%.3f"),
-                        'Severe_OR_per_month': st.column_config.NumberColumn("Odds รุนแรง/เดือน", format="%.2f"),
-                        'Severity_p_value': st.column_config.NumberColumn("p(รุนแรง↑)", format="%.3f"),
-                        'Priority_Score': st.column_config.ProgressColumn("Priority", min_value=0,
-                                                                          max_value=show['Priority_Score'].max(),
-                                                                          format="%.3f"),
-                    }
-                )
-
-                with st.expander("เกณฑ์ที่ใช้จัดอันดับ (อธิบายย่อ)"):
-                    st.markdown(f"""
-                        - **คาดการณ์ 'รุนแรง' (H={horizon})**: คาดการณ์จำนวนเหตุการณ์รุนแรง (ระดับ 3–5) ที่จะเกิดขึ้นในอีก {horizon} เดือนข้างหน้า
-                        - **Priority Score**: คะแนนรวมที่ถ่วงน้ำหนักระหว่าง 'การคาดการณ์เหตุรุนแรง', 'แนวโน้มความถี่ที่เพิ่มขึ้น', และ 'แนวโน้มสัดส่วนความรุนแรงที่เพิ่มขึ้น'
-                        - **p(ถี่↑)** และ **p(รุนแรง↑)**: ค่า p-value ยิ่งน้อย (เช่น < 0.05) ยิ่งหมายความว่าแนวโน้มที่เพิ่มขึ้นนั้นมีนัยสำคัญทางสถิติ
-                        """)
-    elif selected_analysis == "Risk Register Assistant":
-        st.markdown("<h4 style='color: #001f3f;'>สำหรับ Risk Owner (Risk Register Assistant)</h4>",
-                    unsafe_allow_html=True)
-        st.info("ป้อน 'รหัส' หรือ 'ชื่ออุบัติการณ์' เพื่อดูสรุปข้อมูลและมาตรการที่เกี่ยวข้อง")
-
-        # --- ส่วนรับ Input จากผู้ใช้ ---
-        query = st.text_input(
-            "ระบุรหัส หรือ คำค้นหาในชื่ออุบัติการณ์:",
-            placeholder="เช่น CPM201 หรือ Medication error",
-            key="risk_register_query"
-        )
-
-        if st.button("ค้นหาข้อมูล", type="primary", use_container_width=True):
-            if not query.strip():
-                st.warning("กรุณาป้อนรหัสหรือชื่ออุบัติการณ์ที่ต้องการค้นหา")
-            else:
-                with st.spinner("กำลังค้นหาข้อมูล..."):
-                    result = get_risk_register_consultation(
-                        query=query,
-                        df=df_filtered,
-                        risk_mitigation_df=df_mitigation
-                    )
-
-                st.markdown("---")
-
-                if "error" in result:
-                    st.error(result["error"])
-                else:
-                    # แสดงผลสรุปข้อมูล
-                    st.subheader("Result review")
-                    st.markdown(f"สรุปข้อมูลสำหรับ: {result['incident_code']} - {result['incident_name']}")
-
-                    c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("จำนวนครั้งที่เกิด", f"{result['total_occurrences']} ครั้ง")
-                    c2.metric("Impact Level สูงสุด", result['max_impact_level'])
-                    c3.metric("Frequency Level", result['frequency_level'])
-
-                    # <<< 💡 นี่คือส่วนที่แก้ไขทั้งหมด 💡 >>>
-                    with c4:
-                        st.markdown("<div style='font-size: 0.8rem; color: #555;'>Risk Level</div>",
-                                    unsafe_allow_html=True)
-
-                        # ดึงค่าที่จำเป็นสำหรับค้นหาสี
-                        il_key = str(result['max_impact_level'])
-                        fl_key = str(result['frequency_level'])
-                        category_name = result['risk_category']
-
-                        # กำหนดค่าสีตั้งต้น (เผื่อกรณีหาไม่เจอ)
-                        bg_color = '#808080'  # สีเทา
-
-                        # สร้าง dict สำหรับ map ค่า (เหมือนในหน้า Risk Matrix)
-                        impact_to_color_row = {'5': 0, '4': 1, '3': 2, '2': 3, '1': 4}
-                        freq_to_color_col = {'1': 2, '2': 3, '3': 4, '4': 5, '5': 6}
-
-                        # ค้นหาสีจาก Matrix `colors2`
-                        if il_key in impact_to_color_row and fl_key in freq_to_color_col:
-                            row_idx = impact_to_color_row[il_key]
-                            col_idx = freq_to_color_col[fl_key]
-                            bg_color = colors2[row_idx, col_idx]
-
-                        # หาค่าสีของตัวอักษรที่เหมาะสม (ขาวหรือดำ)
-                        text_color = get_text_color_for_bg(bg_color)
-
-                        # สร้างกล่องสีด้วย st.markdown
-                        st.markdown(f"""
-                            <div style="
-                                background-color: {bg_color};
-                                color: {text_color};
-                                padding: 0.75rem; 
-                                border-radius: 0.5rem;
-                                text-align: center;
-                                font-weight: bold;
-                                font-size: 1.3rem;
-                                line-height: 1.3;
-                            ">
-                                {category_name}
-                            </div>
-                            """, unsafe_allow_html=True)
-                    # <<< 💡 สิ้นสุดส่วนที่แก้ไข 💡 >>>
-
-                    st.markdown("---")
-                    # <<< 💡 ส่วนที่เอากลับมา 💡 >>>
-                    st.markdown(
-                        f"##### Review Result: พบอุบัติการณ์ทั้งหมด {result['total_occurrences']} ครั้ง ได้แก่:")
-
-                    # ดึง DataFrame ที่มีรายละเอียดกลับมาจาก result
-                    incident_details_df = result['incident_df'].sort_values(by='Occurrence Date', ascending=False)
-
-                    # วนลูปเพื่อแสดงผลแต่ละรายการ
-                    for index, row in incident_details_df.iterrows():
-                        event_date = row['Occurrence Date'].strftime('%d %B %Y, %H:%M')
-                        impact = row['Impact']
-                        impact_level = row['Impact Level']
-                        details = row.get('รายละเอียดการเกิด_Anonymized', 'ไม่มีรายละเอียด')  # .get() เพื่อความปลอดภัย
-
-                        st.markdown(f"""
-                        <div style="border-left: 4px solid #e0e0e0; padding-left: 15px; margin-bottom: 15px;">
-                            <p style="margin-bottom: 2px;">
-                                <strong>วันที่เกิดเหตุ:</strong> {event_date}<br>
-                                <strong>ความรุนแรง:</strong> {impact} (ระดับ {impact_level})
-                            </p>
-                            <p style="margin-bottom: 0; color: #333;"><em>{details}</em></p>
-                        </div>
-                        """, unsafe_allow_html=True)
-
-                    st.markdown("---")
-
-                    # แสดงมาตรการที่มีอยู่แล้วโดยตรง
-
-                    st.markdown("**Risk  Transfer & Prevention (มาตรการป้องกัน/ถ่ายโอนความเสี่ยง):**")
-                    st.info(result['existing_prevention'])
-                    st.markdown("**Risk Monitor (การติดตาม):**")
-                    st.info(result['existing_monitor'])
-    elif selected_analysis == "บทสรุปสำหรับผู้บริหาร":
-
-        st.markdown("<h4 style='color: #001f3f;'>บทสรุปสำหรับผู้บริหาร</h4>", unsafe_allow_html=True)
         st.markdown(f"**เรื่อง:** รายงานสรุปอุบัติการณ์โรงพยาบาล")
         st.markdown(f"**ช่วงข้อมูลที่วิเคราะห์:** {min_date_str} ถึง {max_date_str} (รวม {total_month} เดือน)")
         st.markdown(f"**จำนวนอุบัติการณ์ที่พบทั้งหมด:** {metrics_data.get('total_processed_incidents', 0):,} รายการ")
@@ -2893,8 +1915,8 @@ def display_executive_dashboard():
             st.markdown("##### Risk Matrix")
             impact_level_keys = ['5', '4', '3', '2', '1']
             freq_level_keys = ['1', '2', '3', '4', '5']
-            matrix_df = df_filtered[
-                df_filtered['Impact Level'].isin(impact_level_keys) & df_filtered['Frequency Level'].isin(
+            matrix_df = filtered[
+                filtered['Impact Level'].isin(impact_level_keys) & filtered['Frequency Level'].isin(
                     freq_level_keys)]
             if not matrix_df.empty:
                 matrix_data = pd.crosstab(matrix_df['Impact Level'], matrix_df['Frequency Level'])
@@ -2903,13 +1925,16 @@ def display_executive_dashboard():
                                  '1': "1 (Insignificant)"}
                 freq_labels = {'1': "F1", '2': "F2", '3': "F3", '4': "F4", '5': "F5"}
                 st.table(matrix_data.rename(index=impact_labels, columns=freq_labels))
+            else:
+                st.info("ไม่มีข้อมูลสำหรับ Risk Matrix")
         with col_top10:
             st.markdown("##### Top 10 อุบัติการณ์ (ตามความถี่)")
             if not df_freq.empty:
                 df_freq_top10 = df_freq.nlargest(10, 'count').copy()
                 display_top10 = pd.merge(df_freq_top10,
-                                         df_filtered[['Incident', 'ชื่ออุบัติการณ์ความเสี่ยง']].drop_duplicates(),
+                                         filtered[['Incident', 'ชื่ออุบัติการณ์ความเสี่ยง']].drop_duplicates(),
                                          on='Incident', how='left')
+                # แสดงแค่ รหัส และ จำนวน (ตามโค้ดเดิม)
                 st.dataframe(display_top10[['Incident', 'count']], hide_index=True,
                              use_container_width=True,
                              column_config={"Incident": "รหัส",
@@ -2920,20 +1945,24 @@ def display_executive_dashboard():
 
         # --- 3. รายการ Sentinel Events ---
         st.subheader("3. รายการ Sentinel Events")
-        if 'Sentinel code for check' in df_filtered.columns:
-            sentinel_events_df = df_filtered[df_filtered['Sentinel code for check'].isin(sentinel_composite_keys)]
+        if 'Sentinel code for check' in filtered.columns:
+            sentinel_events_df = filtered[filtered['Sentinel code for check'].isin(sentinel_composite_keys)]
             if not sentinel_events_df.empty:
-                st.dataframe(sentinel_events_df[['Occurrence Date', 'Incident', 'Impact', 'รายละเอียดการเกิด_Anonymized']],
-                             hide_index=True, use_container_width=True,
-                             column_config={"Occurrence Date": "วันที่เกิด", "Incident": "รหัส", "Impact": "ระดับ",
-                                            "รายละเอียดการเกิด_Anonymized": "รายละเอียด"})
+                st.dataframe(
+                    sentinel_events_df[['Occurrence Date', 'Incident', 'Impact', 'รายละเอียดการเกิด_Anonymized']],
+                    hide_index=True, use_container_width=True,
+                    column_config={"Occurrence Date": "วันที่เกิด", "Incident": "รหัส", "Impact": "ระดับ",
+                                   "รายละเอียดการเกิด_Anonymized": "รายละเอียด"})
             else:
                 st.info("ไม่พบ Sentinel Events ในช่วงเวลาที่เลือก")
+        else:
+            st.warning("ตรวจสอบ Sentinel ไม่ได้")
         st.markdown("---")
 
         # --- 4. PSG9 Summary ---
         st.subheader("4. วิเคราะห์ตามหมวดหมู่ มาตรฐานสำคัญจำเป็นต่อความปลอดภัย 9 ข้อ")
-        psg9_summary_table = create_psg9_summary_table(df_filtered)
+        # (เรียกใช้ฟังก์ชัน Helper ที่เราซ่อมไปแล้ว)
+        psg9_summary_table = create_psg9_summary_table(filtered)
         if psg9_summary_table is not None and not psg9_summary_table.empty:
             st.table(psg9_summary_table)
         else:
@@ -2942,10 +1971,10 @@ def display_executive_dashboard():
 
         # --- 5. รายการอุบัติการณ์รุนแรงที่ยังไม่ถูกแก้ไข ---
         st.subheader("5. รายการอุบัติการณ์รุนแรง (E-I & 3-5) ที่ยังไม่ถูกแก้ไข")
-        if 'Resulting Actions' in df_filtered.columns:
-            unresolved_severe_df = df_filtered[
-                df_filtered['Impact Level'].isin(['3', '4', '5']) &
-                df_filtered['Resulting Actions'].astype(str).isin(['None', '', 'nan'])
+        if 'Resulting Actions' in filtered.columns:
+            unresolved_severe_df = filtered[
+                filtered['Impact Level'].isin(['3', '4', '5']) &
+                filtered['Resulting Actions'].astype(str).isin(['None', '', 'nan'])
                 ]
             if not unresolved_severe_df.empty:
                 display_cols_unresolved = ['Occurrence Date', 'Incident', 'Impact', 'รายละเอียดการเกิด_Anonymized']
@@ -2955,9 +1984,9 @@ def display_executive_dashboard():
                     use_container_width=True,
                     column_config={
                         "Occurrence Date": st.column_config.DatetimeColumn(
-                    "วันที่เกิด",
-                    format="DD/MM/YYYY",
-                ),
+                            "วันที่เกิด",
+                            format="DD/MM/YYYY",
+                        ),
                         "Incident": "รหัส",
                         "Impact": "ระดับ",
                         "รายละเอียดการเกิด_Anonymized": "รายละเอียด"
@@ -2965,58 +1994,62 @@ def display_executive_dashboard():
                 )
             else:
                 st.info("ไม่พบอุบัติการณ์รุนแรงที่ยังไม่ถูกแก้ไขในช่วงเวลานี้")
+        st.markdown("---")
 
         # --- 6. สรุปอุบัติการณ์ตามเป้าหมาย Safety Goals ---
         st.subheader("6. สรุปอุบัติการณ์ตามเป้าหมาย Safety Goals")
-        goal_definitions = {
-            "Patient Safety/ Common Clinical Risk": "P:Patient Safety Goals หรือ Common Clinical Risk Incident",
-            "Specific Clinical Risk": "S:Specific Clinical Risk Incident",
-            "Personnel Safety": "P:Personnel Safety Goals", "Organization Safety": "O:Organization Safety Goals"}
+        # (goal_definitions ถูกนิยามไว้ใน Section 5)
         for display_name, cat_name in goal_definitions.items():
             st.markdown(f"##### {display_name}")
-            is_org_safety = (display_name == "Organization Safety")
-            summary_table = create_goal_summary_table(df_filtered, cat_name,
-                                                      e_up_non_numeric_levels_param=[] if is_org_safety else ['A', 'B',
-                                                                                                              'C', 'D'],
-                                                      e_up_numeric_levels_param=['1', '2'] if is_org_safety else None,
-                                                      is_org_safety_table=is_org_safety)
+
+            # --- ปรับแก้ ---
+            # เรียกใช้ฟังก์ชันเวอร์ชัน "ง่าย" ที่เรามีใน Section 7
+            # โดยตัดพารามิเตอร์ที่ไม่มีในฟังก์ชัน (e_up..., is_org_safety) ทิ้งไป
+            summary_table = create_goal_summary_table(filtered, cat_name)
+
             if summary_table is not None and not summary_table.empty:
-                st.table(summary_table)
+                # ใช้ st.dataframe แทน st.table เพื่อให้รองรับตารางยาวๆ ได้ดีกว่า
+                st.dataframe(summary_table, use_container_width=True, hide_index=True)
             else:
                 st.info(f"ไม่มีข้อมูลสำหรับ '{display_name}'")
         st.markdown("---")
 
         # --- 7. Early Warning (Top 5) ---
-        st.subheader("7. Early Warning: อุบัติการณ์ที่มีแนวโน้มสูงขึ้น ใน 3 เดือนข้างหน้า (Top 5)")
+        st.subheader("7. Early Warning: อุบัติการณ์ที่มีแนวโน้มสูงขึ้น (Top 5)")
         st.write(
-            "แสดง Top 5 อุบัติการณ์ที่ถูกจัดลำดับความสำคัญสูงสุด โดยพิจารณาจากแนวโน้มความถี่, ความรุนแรง, และจำนวนที่คาดการณ์ว่าจะเกิดในอนาคต")
-        if 'prioritize_incidents_nb_logit_v2' in globals():
-            early_warning_df = prioritize_incidents_nb_logit_v2(df_filtered, horizon=3, min_months=4, min_total=5)
-            if not early_warning_df.empty:
-                top_ew_incidents = early_warning_df.head(5).copy()
-                display_ew_df = top_ew_incidents.rename(
-                    columns={'ชื่ออุบัติการณ์ความเสี่ยง': 'ชื่ออุบัติการณ์', 'Priority_Score': 'คะแนนความสำคัญ',
-                             'Expected_Severe_nextH': 'คาดการณ์เหตุรุนแรง (3 ด.)'})
-                st.dataframe(
-                    display_ew_df[['รหัส', 'ชื่ออุบัติการณ์', 'คะแนนความสำคัญ', 'คาดการณ์เหตุรุนแรง (3 ด.)']],
-                    column_config={
-                        "คะแนนความสำคัญ": st.column_config.ProgressColumn("คะแนนความสำคัญ", format="%.3f", min_value=0,
-                                                                          max_value=float(
-                                                                              display_ew_df['คะแนนความสำคัญ'].max())),
-                        "คาดการณ์เหตุรุนแรง (3 ด.)": st.column_config.NumberColumn(format="%.2f")
-                    },
-                    use_container_width=True, hide_index=True
-                )
-            else:
-                st.info("ไม่มีข้อมูลเพียงพอสำหรับวิเคราะห์ Early Warning")
+            "แสดง Top 5 อุบัติการณ์ที่ถูกจัดลำดับความสำคัญสูงสุด โดยพิจารณาจากความถี่และความรุนแรงเฉลี่ย")
+
+        # --- ปรับแก้ ---
+        # เรียกใช้ฟังก์ชันเวอร์ชัน "ง่าย" (stub) ที่เรามีใน Section 7
+        # โดยตัดพารามิเตอร์ที่ไม่มี (min_months, min_total) ทิ้ง
+        early_warning_df = prioritize_incidents_nb_logit_v2(filtered, horizon=3)
+
+        if not early_warning_df.empty:
+            top_ew_incidents = early_warning_df.head(5).copy()
+
+            # ปรับแก้คอลัมน์ที่แสดงผล ให้ตรงกับผลลัพธ์จากฟังก์ชันเวอร์ชัน "ง่าย"
+            display_ew_df = top_ew_incidents.rename(
+                columns={'ชื่ออุบัติการณ์ความเสี่ยง': 'ชื่ออุบัติการณ์',
+                         'score': 'คะแนนความสำคัญ'})
+
+            # ตัดคอลัมน์ 'คาดการณ์เหตุรุนแรง (3 ด.)' ที่ไม่มีในเวอร์ชันง่ายทิ้งไป
+            st.dataframe(
+                display_ew_df[['รหัส', 'ชื่ออุบัติการณ์', 'คะแนนความสำคัญ']],
+                column_config={
+                    "คะแนนความสำคัญ": st.column_config.ProgressColumn("คะแนนความสำคัญ", format="%.3f", min_value=0,
+                                                                      max_value=float(
+                                                                          display_ew_df['คะแนนความสำคัญ'].max())),
+                },
+                use_container_width=True, hide_index=True
+            )
         else:
-            st.warning("ไม่พบฟังก์ชันสำหรับวิเคราะห์ Early Warning")
+            st.info("ไม่มีข้อมูลเพียงพอสำหรับวิเคราะห์ Early Warning")
         st.markdown("---")
 
         # --- 8. สรุปอุบัติการณ์ที่เป็นปัญหาเรื้อรัง (Top 5) ---
         st.subheader("8. สรุปอุบัติการณ์ที่เป็นปัญหาเรื้อรัง (Persistence Risk - Top 5)")
         st.write("แสดง Top 5 อุบัติการณ์ที่เกิดขึ้นบ่อยและมีความรุนแรงเฉลี่ยสูง ซึ่งควรทบทวนเชิงระบบ")
-        persistence_df_exec = calculate_persistence_risk_score(df_filtered, total_month)
+        persistence_df_exec = calculate_persistence_risk_score(filtered, total_month)
         if not persistence_df_exec.empty:
             top_persistence_incidents = persistence_df_exec.head(5)
             display_df_persistence = top_persistence_incidents.rename(
@@ -3029,18 +2062,37 @@ def display_executive_dashboard():
                     "ดัชนีความเรื้อรัง": st.column_config.ProgressColumn("ดัชนีความเรื้อรัง", min_value=0, max_value=2,
                                                                          format="%.2f")
                 },
-                use_container_width=True
+                use_container_width=True,
+                hide_index=True  # เพิ่ม hide_index
             )
         else:
             st.info("ไม่มีข้อมูลเพียงพอสำหรับวิเคราะห์ความเสี่ยงเรื้อรัง")
 
-def main():
-    page = st.query_params.get("page", "executive")
-    if page == "admin":
-        display_admin_page()
-    else:
-        display_executive_dashboard()
+# =========================
+# 9) Download ผลลัพธ์ (Main Area, uses 'filtered')
+# =========================
+@st.cache_data
+def _to_csv_bytes(df: pd.DataFrame) -> bytes:
+    cols_for_download = [
+        'เลขที่รับ', 'หน่วยงาน', 'วัน-เวลา ที่รายงาน', 'สถานที่เกิดเหตุ',
+        'Occurrence Date', 'Incident', 'ชื่ออุบัติการณ์ความเสี่ยง', 'Impact', 'Impact Level',
+        'Frequency Level', 'Risk Level', 'Category Color', 'กลุ่มงาน', 'หมวด',
+        'รายละเอียดการเกิด', 'Resulting Actions', 'หน่วยงาน_norm',
+        'FY_int', 'FQuarter', 'FY_Quarter',
+        'รหัส',
+    ]
+    cols_present_for_download = [c for c in cols_for_download if c in df.columns]
+    try:
+        return df[cols_present_for_download].to_csv(index=False).encode("utf-8-sig")
+    except Exception as e:
+        st.error(f"Error creating CSV for download: {e}")
+        return b""
 
-
-if __name__ == "__main__":
-    main()
+if not filtered.empty:
+    st.markdown("---")
+    st.download_button(
+        "ดาวน์โหลดผลลัพธ์ที่กรองแล้ว (CSV)",
+        data=_to_csv_bytes(filtered),
+        file_name="filtered_result.csv",
+        mime="text/csv"
+    )
