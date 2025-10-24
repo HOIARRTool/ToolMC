@@ -921,15 +921,25 @@ def render_incidents_analysis(df: pd.DataFrame):
 
                 st.markdown("##### กราฟแสดงอุบัติการณ์รุนแรง (ระดับ E-I) ที่พบบ่อย")
                 chart_data = summary_table_code[summary_table_code['รวม E-up'] > 0].copy()
-
+                
                 if chart_data.empty:
                     st.success("ไม่พบอุบัติการณ์รุนแรง (E-I) ในช่วงข้อมูลที่เลือก")
                 else:
-                    top_n_chart = st.slider(
-                        "เลือกจำนวนรหัสที่ต้องการแสดงบนกราฟ:", min_value=1,
-                        max_value=min(30, len(chart_data)), value=min(15, len(chart_data)),
-                        step=1, key="top_n_chart_slider_tab"
-                    )
+                    max_n = min(30, len(chart_data))
+                    if max_n <= 1:
+                        # มีข้อมูล 1 รายการ (หรือกรณีสุดวิสัยที่น้อยกว่านั้น)
+                        top_n_chart = 1
+                        st.caption("มีข้อมูลเพียง 1 รหัส จึงแสดงทั้งหมดโดยไม่ต้องเลือกจำนวน")
+                    else:
+                        top_n_chart = st.slider(
+                            "เลือกจำนวนรหัสที่ต้องการแสดงบนกราฟ:",
+                            min_value=1,
+                            max_value=max_n,
+                            value=min(15, max_n),
+                            step=1,
+                            key="top_n_chart_slider_tab"
+                        )
+                
                     top_chart_data = chart_data.nlargest(top_n_chart, 'รวม E-up')
                     fig = px.bar(
                         top_chart_data.sort_values('รวม E-up', ascending=True),
@@ -938,10 +948,10 @@ def render_incidents_analysis(df: pd.DataFrame):
                         labels={'รวม E-up': 'จำนวนครั้งสะสม (E-I)', 'y': 'รหัสอุบัติการณ์'},
                         text='รวม E-up', color='รวม E-up', color_continuous_scale='Reds'
                     )
-                    fig.update_layout(height=max(400, len(top_chart_data) * 25), yaxis_title=None,
-                                      coloraxis_showscale=False)
+                    fig.update_layout(height=max(400, len(top_chart_data) * 25), yaxis_title=None, coloraxis_showscale=False)
                     fig.update_traces(textposition='outside')
                     st.plotly_chart(fig, use_container_width=True)
+
 
         # --- Tab ที่ 4: รายการอุบัติการณ์ที่รอการแก้ไข ---
         with tab_waitlist:
