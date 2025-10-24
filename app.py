@@ -473,16 +473,51 @@ def filter_by_period_fiscal(df: pd.DataFrame, mode: str, fy: str|int|None=None, 
         if fy_str and 'FY_int' in out.columns: out = out[out['FY_int'].astype(str) == fy_str]
         if m and m != "-- ทั้งหมด --" and 'Month_int' in out.columns: out = out[out['Month_int'].astype(int) == int(m)]
     return out
+def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    new_cols = []
+    for c in df.columns:
+        if isinstance(c, tuple):
+            c = " ".join([str(x) for x in c if x not in (None, "")])
+        c = str(c).replace("\ufeff", "").strip()
+        new_cols.append(c)
+    df.columns = new_cols
+    return df
 
+def _rename_to_standard(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    candidates = {
+        "กลุ่มงาน": ["กลุ่มงาน", "กลุ่ม", "Group", "กลุ่มงาน/ฝ่าย", "กลุ่มงาน (Group)"],
+        "หน่วยงาน": ["หน่วยงาน", "หน่วย", "Unit", "ฝ่าย/หน่วยงาน", "หน่วยงาน/แผนก"],
+    }
+    for target, cands in candidates.items():
+        if target not in df.columns:
+            for c in cands:
+                if c in df.columns:
+                    df = df.rename(columns={c: target})
+                    break
+    return df
 def filter_by_group_and_unit(df: pd.DataFrame, group_name: str, unit_name: str) -> pd.DataFrame:
-    if df.empty: return df
-    out = df.copy()
-    # กลุ่มงาน
+    if df.empty:
+        return df
+
+    out = _normalize_columns(df)
+    out = _rename_to_standard(out)
+
+    required = ["กลุ่มงาน", REF_COL]  # REF_COL = "หน่วยงาน"
+    missing = [c for c in required if c not in out.columns]
+    if missing:
+        st.warning(f"ไม่พบคอลัมน์ที่ต้องใช้ในการกรอง: {', '.join(missing)} — จะแสดงข้อมูลทั้งหมดแทน")
+        return out
+
+    def _norm(x): return str(x).strip().lower()
+
     if group_name not in (None, "", "-- เลือกกลุ่มงาน --", "-- ทั้งหมด --"):
-        out = out[out["กลุ่มงาน"].astype(str) == str(group_name)]
-    # หน่วยงาน
+        out = out[out["กลุ่มงาน"].astype(str).str.strip() == str(group_name).strip()]
+
     if unit_name not in (None, "", "-- ทั้งหมด --"):
-        out = out[out[REF_COL].astype(str) == str(unit_name)]
+        out = out[out[REF_COL].astype(str).str.strip() == str(unit_name).strip()]
+
     return out
 
 # =========================
