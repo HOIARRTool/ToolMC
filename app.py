@@ -650,10 +650,49 @@ if not processed_data_loaded and up is not None:
     except Exception as e:
         st.error(f"ประมวลผล '{up.name}' ไม่สำเร็จ: {e}")
         df_main = pd.DataFrame()
+# หลังจาก df_main = pd.read_parquet(...) และ add_time_parts_fiscal(...) แล้ว
+# >>> PATCH: ensure required columns exist when loading old parquet
+if "หน่วยงาน" not in df_main.columns:
+    # พยายามดึงจากชื่อใกล้เคียง ถ้าไม่มีจริงๆ ค่อยเติม N/A
+    alt_names = ["หน่วยงาน/แผนก", "ฝ่าย/หน่วยงาน", "แผนก", "หน่วยงานที่เกิดเหตุ", "Department", "หน่วย"]
+    found = None
+    for c in alt_names:
+        if c in df_main.columns:
+            found = c
+            break
+    if found:
+        df_main["หน่วยงาน"] = df_main[found].astype(str)
+    else:
+        df_main["หน่วยงาน"] = "N/A"
+
+if "กลุ่มงาน" not in df_main.columns:
+    # ถ้าไม่มี ให้คำนวณจากหน่วยงาน_norm (ถ้ามี) หรือกำหนด N/A
+    if "หน่วยงาน_norm" in df_main.columns:
+        df_main["กลุ่มงาน"] = df_main["หน่วยงาน_norm"].map(service_map_norm).fillna("N/A")
+    else:
+        df_main["กลุ่มงาน"] = "N/A"        
 
 if df_main.empty:
     st.info("👈 กรุณาอัปโหลดไฟล์ข้อมูล...")
     st.stop()
+    
+def _rename_to_standard(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    candidates = {
+        "กลุ่มงาน": ["กลุ่มงาน", "กลุ่ม", "Group", "กลุ่มงาน/ฝ่าย", "กลุ่มงาน (Group)"],
+        "หน่วยงาน": [
+            "หน่วยงาน", "หน่วย", "Unit", "Department",
+            "หน่วยงาน/แผนก", "ฝ่าย/หน่วยงาน", "หน่วยงานที่เกิดเหตุ",
+            "ชื่อหน่วยงาน", "หน่วยที่เกี่ยวข้อง", "ภาควิชา/หน่วยงาน"
+        ],
+    }
+    for target, cands in candidates.items():
+        if target not in df.columns:
+            for c in cands:
+                if c in df.columns:
+                    df = df.rename(columns={c: target})
+                    break
+    return df
 
 # --- Apply Filters selected in Sidebar ---
 fy_opts = ["-- ทั้งหมด --"] + sorted(df_main['FY_int'].astype(str).unique().tolist()) if 'FY_int' in df_main else ["-- ทั้งหมด --"]
