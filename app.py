@@ -629,64 +629,47 @@ with st.sidebar:
 # 6) ประมวลผล (Main Processing Logic)
 # =========================
 df_main = pd.DataFrame()
-processed_data_loaded = False
+processed_data_loaded = False # ใช้ติดตามสถานะการโหลด
 
-# --- Logic 1: (Original) ตรวจสอบไฟล์ที่อัปโหลด (มีความสำคัญสูงสุด) ---
+# --- Logic 1: ตรวจสอบไฟล์ที่อัปโหลด (มีความสำคัญสูงสุด) ---
 if up is not None:
     try:
         raw_df = read_uploaded_table(up)
         with st.spinner(f"กำลังประมวลผลไฟล์ '{up.name}'..."):
             df_main = massage_schema(raw_df); df_main = add_time_parts_fiscal(df_main)
-            processed_data_loaded = True # ตั้งค่าสถานะว่าโหลดข้อมูลแล้ว
-            try:
-                df_main.to_parquet(PERSISTED_DATA_PATH, index=False)
-            except Exception as e:
-                st.sidebar.error(f"บันทึกข้อมูล ({PERSISTED_DATA_PATH.name}) ไม่สำเร็จ: {e}")
+            processed_data_loaded = True 
+            # --- ลบการบันทึก .parquet ออกตามที่ผู้ใช้ร้องขอ ---
+            # (เดิม: df_main.to_parquet(PERSISTED_DATA_PATH, index=False))
+            st.sidebar.success(f"ประมวลผล '{up.name}' สำเร็จ")
+            
     except Exception as e:
         st.error(f"ประมวลผล '{up.name}' ไม่สำเร็จ: {e}")
         df_main = pd.DataFrame()
-        processed_data_loaded = False # ตั้งค่าสถานะว่าล้มเหลว
+        processed_data_loaded = False
 
-# --- Logic 2: (Original) หากไม่มีการอัปโหลด, ลองโหลดจาก parquet ที่บันทึกไว้ ---
-elif not up and Path(PERSISTED_DATA_PATH).is_file(): # ใช้ elif เพื่อให้ทำงานเมื่อ up is None เท่านั้น
-    try:
-        df_main = pd.read_parquet(PERSISTED_DATA_PATH); df_main['Occurrence Date'] = pd.to_datetime(df_main['Occurrence Date'])
-        processed_data_loaded = True
-        df_main = add_time_parts_fiscal(df_main)
-        # st.sidebar.info("โหลดข้อมูลที่บันทึกไว้สำเร็จ") # (Optional: แจ้งผู้ใช้)
-    except Exception as e:
-        st.sidebar.error(f"โหลดข้อมูลเดิม ({PERSISTED_DATA_PATH.name}) ผิดพลาด: {e}")
-        df_main = pd.DataFrame()
-        processed_data_loaded = False # ตั้งค่าสถานะว่าล้มเหลว
-
-# --- Logic 3: (NEW) หากยังไม่มีข้อมูล (ไม่ได้อัปโหลด และไม่มี parquet) ให้โหลดจาก URL ตั้งต้น ---
-if not processed_data_loaded and up is None:
-    # ** แก้ไข URL เป็น raw content **
+# --- Logic 2: (NEW) หากไม่มีการอัปโหลด, ให้โหลดจาก URL ตั้งต้นเสมอ ---
+# (ลบ Logic การโหลดจาก parquet เดิมทิ้งไป)
+elif up is None: 
     DEFAULT_DATA_URL = "https://raw.githubusercontent.com/HOIARRTool/ToolMC/main/jib.xlsx" 
-    st.sidebar.info("ไม่พบข้อมูล, กำลังโหลดข้อมูลตั้งต้น...")
+    st.sidebar.info("ไม่ได้อัปโหลดไฟล์, กำลังโหลดข้อมูลตั้งต้น...")
     try:
         with st.spinner("กำลังโหลดข้อมูลตั้งต้นจาก GitHub..."):
-            # ใช้ pd.read_excel โดยตรงกับ URL
             raw_df = pd.read_excel(DEFAULT_DATA_URL, engine="openpyxl") 
             df_main = massage_schema(raw_df)
             df_main = add_time_parts_fiscal(df_main)
-            processed_data_loaded = True # ตั้งค่าสถานะว่าโหลดข้อมูลแล้ว
-            try:
-                # บันทึกข้อมูลตั้งต้นนี้ลง parquet เพื่อใช้ครั้งถัดไป
-                df_main.to_parquet(PERSISTED_DATA_PATH, index=False)
-                st.sidebar.success("โหลดข้อมูลตั้งต้นสำเร็จ")
-            except Exception as e:
-                st.sidebar.error(f"บันทึกข้อมูลตั้งต้น ({PERSISTED_DATA_PATH.name}) ไม่สำเร็จ: {e}")
+            processed_data_loaded = True
+            st.sidebar.success("โหลดข้อมูลตั้งต้นสำเร็จ")
+            # --- ลบการบันทึก .parquet ออก ---
+            
     except Exception as e:
         st.sidebar.error(f"โหลดข้อมูลตั้งต้นจาก URL ไม่สำเร็จ: {e}")
-        st.sidebar.caption(f"URL: {DEFAULT_DATA_URL}") # แสดง URL ที่พยายามโหลด
+        st.sidebar.caption(f"URL: {DEFAULT_DATA_URL}")
         df_main = pd.DataFrame()
-        processed_data_loaded = False # ตั้งค่าสถานะว่าล้มเหลว
+        processed_data_loaded = False
 
-
-# หลังจาก df_main = pd.read_parquet(...) และ add_time_parts_fiscal(...) แล้ว
+# หลังจาก df_main ถูกโหลด (ไม่ว่าจะจาก upload หรือ URL)
 # >>> PATCH: ensure required columns exist when loading old parquet
-if "หน่วยงาน" not in df_main.columns:
+if processed_data_loaded and "หน่วยงาน" not in df_main.columns:
     # พยายามดึงจากชื่อใกล้เคียง ถ้าไม่มีจริงๆ ค่อยเติม N/A
     alt_names = ["หน่วยงาน/แผนก", "ฝ่าย/หน่วยงาน", "แผนก", "หน่วยงานที่เกิดเหตุ", "Department", "หน่วย"]
     found = None
@@ -699,7 +682,7 @@ if "หน่วยงาน" not in df_main.columns:
     else:
         df_main["หน่วยงาน"] = "N/A"
 
-if "กลุ่มงาน" not in df_main.columns:
+if processed_data_loaded and "กลุ่มงาน" not in df_main.columns:
     # ถ้าไม่มี ให้คำนวณจากหน่วยงาน_norm (ถ้ามี) หรือกำหนด N/A
     if "หน่วยงาน_norm" in df_main.columns:
         df_main["กลุ่มงาน"] = df_main["หน่วยงาน_norm"].map(service_map_norm).fillna("N/A")
@@ -707,7 +690,6 @@ if "กลุ่มงาน" not in df_main.columns:
         df_main["กลุ่มงาน"] = "N/A"
 
 if df_main.empty:
-    # ** ปรับปรุงข้อความให้ชัดเจน **
     st.info("👈 กรุณาอัปโหลดไฟล์ข้อมูล (หรือระบบไม่สามารถโหลดข้อมูลตั้งต้นได้)")
     st.stop()
     
@@ -724,7 +706,7 @@ def _rename_to_standard(df: pd.DataFrame) -> pd.DataFrame:
     for target, cands in candidates.items():
         if target not in df.columns:
             for c in cands:
-                if c in df.columns: # (แก้ไขจากโค้ดเดิมที่อาจมีบั๊กเป็น df.columns)
+                if c in df.columns:
                     df = df.rename(columns={c: target})
                     break
     return df
