@@ -728,7 +728,7 @@ def display_executive_dashboard():
     # ถ้าโหลดข้อมูลไม่สำเร็จ หรือ df_main ว่าง → แจ้งเตือนแล้วหยุด
     if (not processed_data_loaded) or df_main.empty:
         st.info("👈 กรุณาอัปโหลดไฟล์ข้อมูล (หรือระบบไม่สามารถโหลดข้อมูลตั้งต้นได้)")
-        return  # หรือ st.stop() ก็ได้ถ้าใช้ใน Streamlit main script
+        return  # หรือ st.stop() ถ้าใช้ตรงๆ ใน Streamlit main
 
     # =========================
     # ตัวกรองหลัก
@@ -761,11 +761,74 @@ def display_executive_dashboard():
         index=0
     )
 
+    # --- สร้างตัวเลือกปีงบฯ และเดือน จาก df_main ---
+    fy_opts = ["-- ทั้งหมด --"]
+    if "FY_int" in df_main.columns:
+        fy_opts += sorted(df_main["FY_int"].astype(str).unique().tolist())
+
+    month_order = [10, 11, 12] + list(range(1, 10))
+    month_opts = ["-- ทั้งหมด --"]
+    if "Month_int" in df_main.columns:
+        month_opts += [f"{m:02d}-{TH_MONTH_TINY.get(m, '?')}" for m in month_order]
+
+    # --- ส่วนเลือกช่วงเวลาบน Sidebar ---
+    with st.sidebar:
+        sel_fy = None
+        sel_fq = None
+        sel_month_num = None
+
+        if period_mode == "รายปี":
+            sel_fy = st.selectbox("เลือกปีงบประมาณ", fy_opts, index=0)
+
+        elif period_mode == "รายไตรมาส":
+            c1, c2 = st.columns(2)
+            with c1:
+                sel_fy = st.selectbox("ปีงบประมาณ", fy_opts, index=0, key="fq_year")
+            with c2:
+                sel_fq = st.selectbox("ไตรมาส", ["-- ทั้งหมด --", "Q1", "Q2", "Q3", "Q4"], index=0, key="fq_quarter")
+
+        elif period_mode == "รายเดือน":
+            c1, c2 = st.columns(2)
+            with c1:
+                sel_fy = st.selectbox("ปีงบประมาณ", fy_opts, index=0, key="fm_year")
+            with c2:
+                month_label_select = st.selectbox("เดือน", month_opts, index=0, key="fm_month")
+                if month_label_select not in (None, "", "-- ทั้งหมด --"):
+                    sel_month_num = int(month_label_select.split("-")[0])
+
+    # --- ใช้ตัวกรองเวลา + กลุ่ม/หน่วย ---
+    df_time = filter_by_period_fiscal(df_main, period_mode, fy=sel_fy, fq=sel_fq, m=sel_month_num)
+    filtered = filter_by_group_and_unit(df_time, sel_group, sel_unit)
+
+    # --- Update Sidebar Stats ---
+    sidebar_stats_placeholder = st.sidebar.empty()
+    if filtered.empty:
+        sidebar_stats_placeholder.warning("ไม่พบข้อมูล")
+        st.warning("ไม่พบข้อมูลตามตัวกรองที่เลือก")
+    else:
+        min_date_filt = filtered['Occurrence Date'].min()
+        max_date_filt = filtered['Occurrence Date'].max()
+        min_date_str_filt = min_date_filt.strftime('%d/%m/%Y') if pd.notna(min_date_filt) else "N/A"
+        max_date_str_filt = max_date_filt.strftime('%d/%m/%Y') if pd.notna(max_date_filt) else "N/A"
+
+        total_month_filt = 0
+        if pd.notna(min_date_filt) and pd.notna(max_date_filt):
+            max_p_filt = max_date_filt.to_period('M')
+            min_p_filt = min_date_filt.to_period('M')
+            total_month_filt = max(
+                1,
+                (max_p_filt.year - min_p_filt.year) * 12 + (max_p_filt.month - min_p_filt.month) + 1
+            )
+
+        sidebar_stats_placeholder.markdown(f"**ช่วงข้อมูล (กรอง):** {min_date_str_filt} ถึง {max_date_str_filt}")
+        sidebar_stats_placeholder.markdown(f"**จำนวนเดือน (กรอง):** {total_month_filt} เดือน")
+        sidebar_stats_placeholder.markdown(f"**อุบัติการณ์ (กรองแล้ว):** {filtered.shape[0]:,} รายการ")
+
     # ตัวอย่างแสดงข้อมูล
     st.subheader("ตัวอย่างข้อมูลที่โหลดแล้ว")
     st.write(df_main.head())
 
-    
+
 def _rename_to_standard(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     candidates = {
@@ -783,46 +846,11 @@ def _rename_to_standard(df: pd.DataFrame) -> pd.DataFrame:
                     df = df.rename(columns={c: target})
                     break
     return df
-# --- Apply Filters selected in Sidebar ---
-fy_opts = ["-- ทั้งหมด --"] + sorted(df_main['FY_int'].astype(str).unique().tolist()) if 'FY_int' in df_main else ["-- ทั้งหมด --"]
-month_order = [10, 11, 12] + list(range(1, 10))
-month_opts = ["-- ทั้งหมด --"] + [f"{m:02d}-{TH_MONTH_TINY.get(m, '?')}" for m in month_order] if 'Month_int' in df_main else ["-- ทั้งหมด --"]
 
-with st.sidebar:
-    sel_fy = None; sel_fq = None; sel_month_num = None
-    if period_mode == "รายปี":
-        sel_fy = st.selectbox("เลือกปีงบประมาณ", fy_opts, index=0)
-    elif period_mode == "รายไตรมาส":
-        c1, c2 = st.columns(2)
-        with c1: sel_fy = st.selectbox("ปีงบประมาณ", fy_opts, index=0, key="fq_year")
-        with c2: sel_fq = st.selectbox("ไตรมาส", ["-- ทั้งหมด --", "Q1", "Q2", "Q3", "Q4"], index=0, key="fq_quarter")
-    elif period_mode == "รายเดือน":
-        c1, c2 = st.columns(2)
-        with c1: sel_fy = st.selectbox("ปีงบประมาณ", fy_opts, index=0, key="fm_year")
-        with c2:
-            month_label_select = st.selectbox("เดือน", month_opts, index=0, key="fm_month")
-            if month_label_select not in (None, "", "-- ทั้งหมด --"):
-                sel_month_num = int(month_label_select.split("-")[0])
 
-df_time = filter_by_period_fiscal(df_main, period_mode, fy=sel_fy, fq=sel_fq, m=sel_month_num)
-filtered = filter_by_group_and_unit(df_time, sel_group, sel_unit)
+if __name__ == "__main__":
+    display_executive_dashboard()
 
-# --- Update Sidebar Stats ---
-sidebar_stats_placeholder = st.sidebar.empty()
-if filtered.empty:
-    sidebar_stats_placeholder.warning("ไม่พบข้อมูล")
-    st.warning("ไม่พบข้อมูลตามตัวกรองที่เลือก")
-else:
-    min_date_filt = filtered['Occurrence Date'].min(); max_date_filt = filtered['Occurrence Date'].max()
-    min_date_str_filt = min_date_filt.strftime('%d/%m/%Y') if pd.notna(min_date_filt) else "N/A"
-    max_date_str_filt = max_date_filt.strftime('%d/%m/%Y') if pd.notna(max_date_filt) else "N/A"
-    total_month_filt = 0
-    if pd.notna(min_date_filt) and pd.notna(max_date_filt):
-        max_p_filt = max_date_filt.to_period('M'); min_p_filt = min_date_filt.to_period('M')
-        total_month_filt = max(1, (max_p_filt.year - min_p_filt.year) * 12 + (max_p_filt.month - min_p_filt.month) + 1)
-    sidebar_stats_placeholder.markdown(f"**ช่วงข้อมูล (กรอง):** {min_date_str_filt} ถึง {max_date_str_filt}")
-    sidebar_stats_placeholder.markdown(f"**จำนวนเดือน (กรอง):** {total_month_filt} เดือน")
-    sidebar_stats_placeholder.markdown(f"**อุบัติการณ์ (กรองแล้ว):** {filtered.shape[0]:,} รายการ")
     app_functions_list = ["RCA Helpdesk (AI Assistant)"]
     st.sidebar.markdown("---");
     st.sidebar.markdown("เลือกส่วนที่ต้องการแสดงผล:")
