@@ -391,7 +391,7 @@ def massage_schema(df: pd.DataFrame) -> pd.DataFrame:
     df.rename(columns={"วัน-เวลา ที่เกิดเหตุ": "Occurrence Date"}, inplace=True)
     converted = df["Occurrence Date"].apply(parse_incident_datetime)
     bad = converted.isna().sum()
-    if bad > 0: st.warning(f"ข้าม {bad} แถวที่มีวันที่ผิดรูปแบบ")
+    
     df["Occurrence Date"] = converted
     df.dropna(subset=["Occurrence Date"], inplace=True)
     if df.empty: st.error("ไม่พบข้อมูลที่มีวันที่ถูกต้อง"); st.stop()
@@ -640,13 +640,17 @@ colors2 = np.array([["#e1f5fe","#f6c8b6","#dd191d","#dd191d","#dd191d","#dd191d"
                     ["#e1f5fe","#f6c8b6","#f6c8b6","#f6c8b6","#f6c8b6","#f6c8b6","#f6c8b6"],
                     ["#e1f5fe","#e1f5fe","#e1f5fe","#e1f5fe","#e1f5fe","#e1f5fe","#e1f5fe"]])
 
-# --- Sidebar ---
 def display_executive_dashboard():
     log_visit() 
     # --- 1. สร้าง Sidebar และเมนูเลือกหน้า ---
     st.sidebar.markdown(
-        f"""<div style="display: flex; align-items: center; margin-bottom: 1rem;"><img src="{LOGO_URL}" style="height: 32px; margin-right: 10px;"><h2 style="margin: 0; font-size: 1.7rem;"><span class="gradient-text">HOIA-RR Menu</span></h2></div>""",
-        unsafe_allow_html=True)
+        f"""<div style="display: flex; align-items: center; margin-bottom: 1rem;">
+        <img src="{LOGO_URL}" style="height: 32px; margin-right: 10px;">
+        <h2 style="margin: 0; font-size: 1.7rem;">
+            <span class="gradient-text">HOIA-RR Menu</span>
+        </h2></div>""",
+        unsafe_allow_html=True
+    )
 
     # --- Upload and Filters ---
     st.header("อัปโหลดข้อมูล")
@@ -655,6 +659,14 @@ def display_executive_dashboard():
         type=["csv", "xlsx", "xls"],
         key="main_uploader"
     )
+
+    # ✅ ใช้ up ใน scope เดียวกัน
+    if up is not None:
+        # ตัวอย่าง: โหลดไฟล์
+        import pandas as pd
+        df = pd.read_excel(up)
+        st.write("ตัวอย่างข้อมูล:", df.head())
+
 
     st.header("ตัวกรองหลัก")
     GROUP_OPTIONS = ["-- เลือกกลุ่มงาน --", "-- ทั้งหมด --"] + sorted(REF_DF["กลุ่มงาน"].unique().tolist())
