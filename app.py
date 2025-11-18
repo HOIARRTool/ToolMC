@@ -639,9 +639,9 @@ colors2 = np.array([["#e1f5fe","#f6c8b6","#dd191d","#dd191d","#dd191d","#dd191d"
                     ["#e1f5fe","#f6c8b6","#42db41","#42db41","#42db41","#ffee58","#ffee58"],
                     ["#e1f5fe","#f6c8b6","#f6c8b6","#f6c8b6","#f6c8b6","#f6c8b6","#f6c8b6"],
                     ["#e1f5fe","#e1f5fe","#e1f5fe","#e1f5fe","#e1f5fe","#e1f5fe","#e1f5fe"]])
-
 def display_executive_dashboard():
     log_visit() 
+
     # --- 1. สร้าง Sidebar และเมนูเลือกหน้า ---
     st.sidebar.markdown(
         f"""<div style="display: flex; align-items: center; margin-bottom: 1rem;">
@@ -660,41 +660,65 @@ def display_executive_dashboard():
         key="main_uploader"
     )
 
-    # ✅ ใช้ up ใน scope เดียวกัน
+    # =========================
+    # 6) ประมวลผล (Main Processing Logic)
+    # =========================
+    df_main = pd.DataFrame()
+    processed_data_loaded = False  # ใช้ติดตามสถานะการโหลด
+
+    # --- Logic 1: ตรวจสอบไฟล์ที่อัปโหลด (มีความสำคัญสูงสุด) ---
     if up is not None:
-        # ตัวอย่าง: โหลดไฟล์
-        import pandas as pd
-        df = pd.read_excel(up)
-        st.write("ตัวอย่างข้อมูล:", df.head())
+        try:
+            raw_df = read_uploaded_table(up)
+            with st.spinner(f"กำลังประมวลผลไฟล์ '{up.name}'..."):
+                df_main = massage_schema(raw_df)
+                df_main = add_time_parts_fiscal(df_main)
+                processed_data_loaded = True
+                st.sidebar.success(f"ประมวลผล '{up.name}' สำเร็จ")
+        except Exception as e:
+            st.error(f"เกิดข้อผิดพลาดระหว่างประมวลผลไฟล์: {e}")
 
+    # ถ้าอยากแสดงตัวอย่างข้อมูลหลังประมวลผล
+    if processed_data_loaded:
+        st.subheader("ตัวอย่างข้อมูลหลังประมวลผล")
+        st.write(df_main.head())
 
+    # =========================
+    # ตัวกรองหลัก
+    # =========================
     st.header("ตัวกรองหลัก")
-    GROUP_OPTIONS = ["-- เลือกกลุ่มงาน --", "-- ทั้งหมด --"] + sorted(REF_DF["กลุ่มงาน"].unique().tolist())
+    GROUP_OPTIONS = ["-- เลือกกลุ่มงาน --", "-- ทั้งหมด --"] + sorted(
+        REF_DF["กลุ่มงาน"].unique().tolist()
+    )
     sel_group = st.selectbox("เลือกกลุ่มงาน", GROUP_OPTIONS, index=1)
+
     if sel_group == "-- ทั้งหมด --":
         sel_unit = "-- ทั้งหมด --"
         st.selectbox("เลือกหน่วยงาน", ["-- ทั้งหมด --"], index=0, disabled=True)
     else:
         unit_options = list_units(sel_group)
-        sel_unit = st.selectbox("เลือกหน่วยงาน", ["-- ทั้งหมด --"] + unit_options, index=0, disabled=(sel_group in ("", "-- เลือกกลุ่มงาน --")))
-    st.header("ตัวกรองช่วงเวลา (ปีงบประมาณ)")
-    period_mode = st.selectbox("โหมดช่วงเวลา", ["ทั้งหมด", "รายปี", "รายไตรมาส", "รายเดือน"], index=0)
-# =========================
-# 6) ประมวลผล (Main Processing Logic)
-# =========================
-df_main = pd.DataFrame()
-processed_data_loaded = False # ใช้ติดตามสถานะการโหลด
+        sel_unit = st.selectbox(
+            "เลือกหน่วยงาน",
+            ["-- ทั้งหมด --"] + unit_options,
+            index=0,
+            disabled=(sel_group in ("", "-- เลือกกลุ่มงาน --"))
+        )
 
-# --- Logic 1: ตรวจสอบไฟล์ที่อัปโหลด (มีความสำคัญสูงสุด) ---
-if up is not None:
-    try:
-        raw_df = read_uploaded_table(up)
-        with st.spinner(f"กำลังประมวลผลไฟล์ '{up.name}'..."):
-            df_main = massage_schema(raw_df); df_main = add_time_parts_fiscal(df_main)
-            processed_data_loaded = True 
-            # --- ลบการบันทึก .parquet ออกตามที่ผู้ใช้ร้องขอ ---
-            # (เดิม: df_main.to_parquet(PERSISTED_DATA_PATH, index=False))
-            st.sidebar.success(f"ประมวลผล '{up.name}' สำเร็จ")
+    # =========================
+    # ตัวกรองช่วงเวลา (ปีงบประมาณ)
+    # =========================
+    st.header("ตัวกรองช่วงเวลา (ปีงบประมาณ)")
+    period_mode = st.selectbox(
+        "โหมดช่วงเวลา",
+        ["ทั้งหมด", "รายปี", "รายไตรมาส", "รายเดือน"],
+        index=0
+    )
+
+    # จากนี้ไป หากต้องใช้ df_main + ตัวกรอง ก็เขียนต่อในฟังก์ชันนี้ได้เลย
+    # เช่นถ้าอยากให้ทำงานต่อเมื่อโหลดข้อมูลแล้ว:
+    if not processed_data_loaded:
+        st.info("โปรดอัปโหลดไฟล์ข้อมูลก่อนเพื่อเริ่มการวิเคราะห์")
+
             
     except Exception as e:
         st.error(f"ประมวลผล '{up.name}' ไม่สำเร็จ: {e}")
