@@ -652,7 +652,7 @@ def display_executive_dashboard():
         unsafe_allow_html=True
     )
 
-    # --- Upload and Filters ---
+    # --- Upload ---
     st.header("อัปโหลดข้อมูล")
     up = st.file_uploader(
         "อัปโหลดไฟล์ (.xlsx)",
@@ -666,7 +666,7 @@ def display_executive_dashboard():
     df_main = pd.DataFrame()
     processed_data_loaded = False  # ใช้ติดตามสถานะการโหลด
 
-    # --- Logic 1: ตรวจสอบไฟล์ที่อัปโหลด (มีความสำคัญสูงสุด) ---
+    # --- Logic 1: ถ้ามีการอัปโหลดไฟล์ ให้ใช้ไฟล์นั้นก่อน ---
     if up is not None:
         try:
             raw_df = read_uploaded_table(up)
@@ -676,12 +676,40 @@ def display_executive_dashboard():
                 processed_data_loaded = True
                 st.sidebar.success(f"ประมวลผล '{up.name}' สำเร็จ")
         except Exception as e:
-            st.error(f"เกิดข้อผิดพลาดระหว่างประมวลผลไฟล์: {e}")
+            st.error(f"ประมวลผล '{up.name}' ไม่สำเร็จ: {e}")
+            df_main = pd.DataFrame()
+            processed_data_loaded = False
 
-    # ถ้าอยากแสดงตัวอย่างข้อมูลหลังประมวลผล
-    if processed_data_loaded:
-        st.subheader("ตัวอย่างข้อมูลหลังประมวลผล")
-        st.write(df_main.head())
+    # --- Logic 2: หากไม่มีการอัปโหลด ให้โหลดจาก URL ตั้งต้น ---
+    else:
+        DEFAULT_DATA_URL = "https://raw.githubusercontent.com/HOIARRTool/ToolMC/main/jib.xlsx"
+        st.sidebar.info("ไม่ได้อัปโหลดไฟล์, กำลังโหลดข้อมูลตั้งต้น...")
+
+        try:
+            with st.spinner("กำลังโหลดข้อมูลตั้งต้นจาก GitHub..."):
+                raw_df = pd.read_excel(DEFAULT_DATA_URL, engine="openpyxl")
+                df_main = massage_schema(raw_df)
+                df_main = add_time_parts_fiscal(df_main)
+                processed_data_loaded = True
+                st.sidebar.success("โหลดข้อมูลตั้งต้นสำเร็จ")
+        except Exception as e:
+            st.sidebar.error(f"โหลดข้อมูลตั้งต้นจาก URL ไม่สำเร็จ: {e}")
+            st.sidebar.caption(f"URL: {DEFAULT_DATA_URL}")
+            df_main = pd.DataFrame()
+            processed_data_loaded = False
+
+    # หลังจาก df_main ถูกโหลด (ไม่ว่าจะจาก upload หรือ URL)
+    if processed_data_loaded and "หน่วยงาน" not in df_main.columns:
+        alt_names = ["หน่วยงาน/แผนก", "ฝ่าย/หน่วยงาน", "แผนก", "หน่วยงานที่เกิดเหตุ", "Department", "หน่วย"]
+        found = None
+        for c in alt_names:
+            if c in df_main.columns:
+                found = c
+                break
+        if found:
+            df_main["หน่วยงาน"] = df_main[found].astype(str)
+        else:
+            df_main["หน่วยงาน"] = "N/A"
 
     # =========================
     # ตัวกรองหลัก
@@ -714,19 +742,12 @@ def display_executive_dashboard():
         index=0
     )
 
+    if not processed_data_loaded:
+        st.info("โปรดอัปโหลดไฟล์ หรือใช้ข้อมูลตั้งต้นเพื่อเริ่มการวิเคราะห์")
+    else:
+        st.subheader("ตัวอย่างข้อมูลที่โหลดแล้ว")
+        st.write(df_main.head())
 
-if up is None: 
-    DEFAULT_DATA_URL = "https://raw.githubusercontent.com/HOIARRTool/ToolMC/main/jib.xlsx" 
-    st.sidebar.info("ไม่ได้อัปโหลดไฟล์, กำลังโหลดข้อมูลตั้งต้น...")
-    try:
-        with st.spinner("กำลังโหลดข้อมูลตั้งต้นจาก GitHub..."):
-            raw_df = pd.read_excel(DEFAULT_DATA_URL, engine="openpyxl") 
-            df_main = massage_schema(raw_df)
-            df_main = add_time_parts_fiscal(df_main)
-            processed_data_loaded = True
-            st.sidebar.success("โหลดข้อมูลตั้งต้นสำเร็จ")
-            # --- ลบการบันทึก .parquet ออก ---
-            
     except Exception as e:
         st.sidebar.error(f"โหลดข้อมูลตั้งต้นจาก URL ไม่สำเร็จ: {e}")
         st.sidebar.caption(f"URL: {DEFAULT_DATA_URL}")
