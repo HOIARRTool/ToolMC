@@ -714,9 +714,8 @@ def display_executive_dashboard():
         index=0
     )
 
-# --- Logic 2: (NEW) หากไม่มีการอัปโหลด, ให้โหลดจาก URL ตั้งต้นเสมอ ---
-# (ลบ Logic การโหลดจาก parquet เดิมทิ้งไป)
-elif up is None: 
+
+if up is None: 
     DEFAULT_DATA_URL = "https://raw.githubusercontent.com/HOIARRTool/ToolMC/main/jib.xlsx" 
     st.sidebar.info("ไม่ได้อัปโหลดไฟล์, กำลังโหลดข้อมูลตั้งต้น...")
     try:
