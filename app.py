@@ -714,17 +714,6 @@ def display_executive_dashboard():
         index=0
     )
 
-    # จากนี้ไป หากต้องใช้ df_main + ตัวกรอง ก็เขียนต่อในฟังก์ชันนี้ได้เลย
-    # เช่นถ้าอยากให้ทำงานต่อเมื่อโหลดข้อมูลแล้ว:
-    if not processed_data_loaded:
-        st.info("โปรดอัปโหลดไฟล์ข้อมูลก่อนเพื่อเริ่มการวิเคราะห์")
-
-            
-        except Exception as e:
-            st.error(f"ประมวลผล '{up.name}' ไม่สำเร็จ: {e}")
-            df_main = pd.DataFrame()
-            processed_data_loaded = False
-
 # --- Logic 2: (NEW) หากไม่มีการอัปโหลด, ให้โหลดจาก URL ตั้งต้นเสมอ ---
 # (ลบ Logic การโหลดจาก parquet เดิมทิ้งไป)
 elif up is None: 
