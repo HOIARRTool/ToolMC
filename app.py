@@ -748,12 +748,6 @@ def display_executive_dashboard():
         st.subheader("ตัวอย่างข้อมูลที่โหลดแล้ว")
         st.write(df_main.head())
 
-    except Exception as e:
-        st.sidebar.error(f"โหลดข้อมูลตั้งต้นจาก URL ไม่สำเร็จ: {e}")
-        st.sidebar.caption(f"URL: {DEFAULT_DATA_URL}")
-        df_main = pd.DataFrame()
-        processed_data_loaded = False
-
 # หลังจาก df_main ถูกโหลด (ไม่ว่าจะจาก upload หรือ URL)
 # >>> PATCH: ensure required columns exist when loading old parquet
 if processed_data_loaded and "หน่วยงาน" not in df_main.columns:
