@@ -720,10 +720,10 @@ def display_executive_dashboard():
         st.info("โปรดอัปโหลดไฟล์ข้อมูลก่อนเพื่อเริ่มการวิเคราะห์")
 
             
-    except Exception as e:
-        st.error(f"ประมวลผล '{up.name}' ไม่สำเร็จ: {e}")
-        df_main = pd.DataFrame()
-        processed_data_loaded = False
+        except Exception as e:
+            st.error(f"ประมวลผล '{up.name}' ไม่สำเร็จ: {e}")
+            df_main = pd.DataFrame()
+            processed_data_loaded = False
 
 # --- Logic 2: (NEW) หากไม่มีการอัปโหลด, ให้โหลดจาก URL ตั้งต้นเสมอ ---
 # (ลบ Logic การโหลดจาก parquet เดิมทิ้งไป)
