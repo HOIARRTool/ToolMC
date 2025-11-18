@@ -641,8 +641,13 @@ colors2 = np.array([["#e1f5fe","#f6c8b6","#dd191d","#dd191d","#dd191d","#dd191d"
                     ["#e1f5fe","#e1f5fe","#e1f5fe","#e1f5fe","#e1f5fe","#e1f5fe","#e1f5fe"]])
 
 # --- Sidebar ---
-with st.sidebar:
-    st.markdown(f"""<div style="display: flex; align-items: center; margin-bottom: 1rem;"><img src="{LOGO_URL}" style="height: 32px; margin-right: 10px;"><h2 style="margin: 0; font-size: 1.7rem;"><span class="gradient-text">HOIA-RR Menu</span></h2></div>""", unsafe_allow_html=True)
+def display_executive_dashboard():
+    log_visit() 
+    # --- 1. สร้าง Sidebar และเมนูเลือกหน้า ---
+    st.sidebar.markdown(
+        f"""<div style="display: flex; align-items: center; margin-bottom: 1rem;"><img src="{LOGO_URL}" style="height: 32px; margin-right: 10px;"><h2 style="margin: 0; font-size: 1.7rem;"><span class="gradient-text">HOIA-RR Menu</span></h2></div>""",
+        unsafe_allow_html=True)
+
     # --- Upload and Filters ---
     st.header("อัปโหลดข้อมูล")
     up = st.file_uploader(
@@ -791,7 +796,7 @@ else:
     st.sidebar.markdown("---");
     st.sidebar.markdown("เลือกส่วนที่ต้องการแสดงผล:")
 
-    dashboard_pages_list = ["แดชบอร์ดสรุปภาพรวม", "Incidents Analysis","Risk Matrix (Interactive)","Risk level", "Risk Register Assistant", "Heatmap รายเดือน", "Sentinel Events & Top 10", "กราฟสรุปอุบัติการณ์ (รายมิติ)", "สรุปอุบัติการณ์ตาม Safety Goals", "Persistence Risk Index", "Early Warning: อุบัติการณ์ที่มีแนวโน้มสูงขึ้น", "บทสรุปสำหรับผู้บริหาร"]
+    dashboard_pages_list = ["แดชบอร์ดสรุปภาพรวม", "Incidents Analysis","Risk Matrix (Interactive)","Risk level", "Risk Register Assistant", "Heatmap รายเดือน", "Sentinel Events & Top 10", "สรุปอุบัติการณ์ตาม Safety Goals", "Persistence Risk Index", "Early Warning: อุบัติการณ์ที่มีแนวโน้มสูงขึ้น", "บทสรุปสำหรับผู้บริหาร"]
     if 'selected_analysis' not in st.session_state: st.session_state.selected_analysis = "แดชบอร์ดสรุปภาพรวม"
     st.markdown("---")
     for option in app_functions_list:
@@ -1852,57 +1857,6 @@ elif selected_page == "Sentinel Events & Top 10":
             st.dataframe(top10_df[['Incident', 'ชื่ออุบัติการณ์ความเสี่ยง', 'count']], hide_index=True, use_container_width=True, column_config={"Incident": "รหัส", "count":"จำนวน"})
         else:
             st.warning("แสดง Top 10 ไม่ได้")
-
-elif selected_page == "กราฟสรุปอุบัติการณ์ (รายมิติ)":
-    st.markdown("<h4 style='color: #001f3f;'>กราฟสรุปอุบัติการณ์ (รายมิติ)</h4>", unsafe_allow_html=True)
-    if filtered.empty:
-        st.info("ไม่มีข้อมูลตามตัวกรอง")
-    else:
-        pastel_color_discrete_map_dimensions = {'Extreme':'#d9534f', 'High': '#FFCC99', 'Medium': '#FFFF99', 'Low': '#99FF99', 'Undefined': '#D3D3D3', 'Critical': '#FF9999'}
-        tab1_v, tab2_v, tab3_v, tab4_v = st.tabs(["👁️By Goals", "👁️By Group", "👁️By Shift", "👁️By Place"])
-        df_charts = filtered.copy(); df_charts['Count'] = 1
-        with tab1_v:
-            st.markdown("ตามหมวด")
-            if 'หมวด' in df_charts.columns:
-                df_c1 = df_charts[~df_charts['หมวด'].astype(str).isin(['N/A', 'None'])]
-                if not df_c1.empty:
-                    fig_c1 = px.bar(df_c1.groupby(['หมวด', 'Category Color'], observed=True).size().reset_index(name='Count'), x='หมวด', y='Count', color='Category Color', color_discrete_map=pastel_color_discrete_map_dimensions, title="ตามหมวด")
-                    fig_c1.update_layout(xaxis={'categoryorder':'total descending'}); st.plotly_chart(fig_c1, use_container_width=True)
-                else: st.info("ไม่มีข้อมูลหมวด")
-            else: st.warning("ไม่พบ 'หมวด'")
-        with tab2_v:
-            st.markdown("ตามกลุ่มงาน")
-            if 'กลุ่มงาน' in df_charts.columns:
-                df_c2 = df_charts[~df_charts['กลุ่มงาน'].astype(str).isin(['N/A', 'None'])]
-                if not df_c2.empty:
-                    fig_c2 = px.bar(df_c2.groupby(['กลุ่มงาน', 'Category Color'], observed=True).size().reset_index(name='Count'), x='กลุ่มงาน', y='Count', color='Category Color', color_discrete_map=pastel_color_discrete_map_dimensions, title="ตามกลุ่มงาน")
-                    fig_c2.update_layout(xaxis={'categoryorder':'total descending'}); st.plotly_chart(fig_c2, use_container_width=True)
-                else: st.info("ไม่มีข้อมูลกลุ่มงาน")
-            else: st.warning("ไม่พบ 'กลุ่มงาน'")
-        with tab3_v:
-            st.markdown("ตามเวร")
-            if 'ช่วงเวลา/เวร' in df_charts.columns:
-                df_c3 = df_charts[df_charts['ช่วงเวลา/เวร'].notna() & ~df_charts['ช่วงเวลา/เวร'].astype(str).isin(['None', 'N/A'])]
-                if not df_c3.empty:
-                    fig_c3 = px.bar(df_c3.groupby(['ช่วงเวลา/เวร', 'Category Color'], observed=True).size().reset_index(name='Count'), x='ช่วงเวลา/เวร', y='Count', color='Category Color', color_discrete_map=pastel_color_discrete_map_dimensions, title="ตามเวร")
-                    fig_c3.update_layout(xaxis={'categoryorder':'array', 'categoryarray':['เช้า','บ่าย','ดึก']})
-                    st.plotly_chart(fig_c3, use_container_width=True)
-                else: st.info("ไม่มีข้อมูลเวร")
-            else: st.warning("ไม่พบ 'ช่วงเวลา/เวร'")
-        with tab4_v:
-            st.markdown("ตามสถานที่")
-            if 'ชนิดสถานที่' in df_charts.columns:
-                df_c4 = df_charts[df_charts['ชนิดสถานที่'].notna() & ~df_charts['ชนิดสถานที่'].astype(str).isin(['None', 'N/A'])]
-                if not df_c4.empty:
-                    place_counts = df_c4['ชนิดสถานที่'].value_counts()
-                    threshold = max(5, int(len(place_counts) * 0.05))
-                    other_places = place_counts[place_counts < threshold].index
-                    df_c4['ชนิดสถานที่_Agg'] = df_c4['ชนิดสถานที่'].apply(lambda x: 'อื่นๆ' if x in other_places else x)
-                    fig_c4 = px.bar(df_c4.groupby(['ชนิดสถานที่_Agg', 'Category Color'], observed=True).size().reset_index(name='Count'), x='ชนิดสถานที่_Agg', y='Count', color='Category Color', color_discrete_map=pastel_color_discrete_map_dimensions, title="ตามสถานที่")
-                    fig_c4.update_layout(xaxis_title="สถานที่", xaxis={'categoryorder':'total descending'})
-                    st.plotly_chart(fig_c4, use_container_width=True)
-                else: st.info("ไม่มีข้อมูลสถานที่")
-            else: st.warning("ไม่พบ 'ชนิดสถานที่'")
 
 elif selected_page == "สรุปอุบัติการณ์ตาม Safety Goals":
     st.markdown("<h4 style='color: #001f3f;'>สรุปอุบัติการณ์ตาม Safety Goals</h4>", unsafe_allow_html=True)
