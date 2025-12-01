@@ -1502,46 +1502,68 @@ def create_goal_summary_table(
 ) -> pd.DataFrame:
     """
     สรุปอุบัติการณ์ตาม Safety Goal:
-    - เลือกแถวตามค่าในคอลัมน์ 'หมวด' (เช่น 'P:Patient Safety Goals หรือ Common Clinical Risk Incident')
-    - จัดกลุ่มตาม Incident Type (3 ตัวแรกของรหัส) แล้วแมปเป็น Incident Type Name จาก type_name
-    - นับจำนวนแยกระดับความรุนแรง (Impact หรือ Impact Level)
+    - เลือกแถวตาม 'หมวด' (ใช้ทั้งแบบเท่ากันเป๊ะ และแบบ contains เพื่อกันเคสข้อความไม่ตรง 100%)
+    - จัดกลุ่มตาม Incident Type Name แล้วนับจำนวนแยกระดับความรุนแรง
     - คำนวณ รวม E-up / รวม A-I / ร้อยละ E-up
     """
 
-    # ไม่มีข้อมูล หรือไม่มีคอลัมน์ 'หมวด' → คืนตารางว่าง
     if data_df_goal.empty or 'หมวด' not in data_df_goal.columns:
         return pd.DataFrame()
 
     df = data_df_goal.copy()
 
-    # ถ้าไม่ได้กำหนดว่าเป็น Organization Safety หรือไม่ ให้เดาจากชื่อหมวด
+    # --- เดาว่าเป็น Org Safety หรือไม่ (ถ้าไม่ส่งมาก็เดาจากตัวอักษรหน้าคอลอน) ---
     if is_org_safety_table is None:
         is_org_safety_table = str(goal_category_name_param).strip().upper().startswith("O:")
 
     # ตั้งค่า default ของระดับที่ "ไม่" นับเป็น E-up
     if e_up_non_numeric_levels_param is None and not is_org_safety_table:
-        # สำหรับ Clinical / Patient / Personnel: นับ E-I เป็นรุนแรง → ตัด A-D ทิ้ง
         e_up_non_numeric_levels_param = ['A', 'B', 'C', 'D']
     if e_up_numeric_levels_param is None and is_org_safety_table:
-        # สำหรับ Organization Safety: นับ 3-5 เป็นรุนแรง → ตัด 1-2 ทิ้ง
         e_up_numeric_levels_param = ['1', '2']
 
-    # ---------- 1) Filter ตามหมวด Safety Goal ให้ตรงเป๊ะ ----------
-    goal_text = str(goal_category_name_param).strip()
-    df = df[df['หมวด'].astype(str).str.strip() == goal_text]
+    # ===================== 1) Filter ตาม 'หมวด' =====================
+    col = df['หมวด'].astype(str)
 
+    raw_goal = str(goal_category_name_param)
+    goal_exact = raw_goal.strip()
+
+    # 1.1 ลองแบบเท่ากันเป๊ะก่อน
+    mask_exact = col.str.strip() == goal_exact
+
+    # 1.2 ถ้าไม่เจอเลย ลองใช้ส่วนหลังเครื่องหมาย ":" เป็น key ในการ search
+    if not mask_exact.any():
+        if ":" in raw_goal:
+            after_colon = raw_goal.split(":", 1)[1].strip()
+        else:
+            after_colon = raw_goal.strip()
+
+        # contains แบบไม่สนใจตัวพิมพ์เล็ก/ใหญ่
+        mask_contains = col.str.contains(after_colon, case=False, na=False)
+
+        # 1.3 ถ้ายังไม่เจอเลยอีก ลองใช้ตัวอักษรตัวแรก (P/S/O) ข้างหน้าคอลอน
+        if not mask_contains.any():
+            key_prefix = raw_goal.split(":", 1)[0].strip()
+            mask_prefix = col.str.startswith(key_prefix + ":", na=False)
+        else:
+            mask_prefix = mask_contains
+
+        mask = mask_prefix
+    else:
+        mask = mask_exact
+
+    df = df[mask].copy()
     if df.empty:
         return pd.DataFrame()
 
-    # ---------- 2) เตรียม Incident Type Name ----------
+    # ===================== 2) เตรียม Incident Type Name =====================
     if 'Incident Type' not in df.columns:
         df['Incident Type'] = df['Incident'].astype(str).str[:3]
 
     df['Incident Type Name'] = df['Incident Type'].map(type_name).fillna(df['Incident Type'])
 
-    # ---------- 3) เลือกคอลัมน์ความรุนแรง ----------
+    # ===================== 3) เลือกคอลัมน์ความรุนแรง =====================
     if is_org_safety_table:
-        # Organization Safety: ใช้ Impact Level (1–5)
         if 'Impact Level' not in df.columns:
             return pd.DataFrame()
         sev_col = 'Impact Level'
@@ -1549,7 +1571,6 @@ def create_goal_summary_table(
         all_sev_order = ['1', '2', '3', '4', '5']
         excluded = set(e_up_numeric_levels_param or [])
     else:
-        # ที่เหลือใช้ Impact (A–I)
         if 'Impact' not in df.columns:
             return pd.DataFrame()
         sev_col = 'Impact'
@@ -1557,46 +1578,41 @@ def create_goal_summary_table(
         all_sev_order = list('ABCDEFGHI')
         excluded = set(e_up_non_numeric_levels_param or [])
 
-    # เอาเฉพาะระดับความรุนแรงที่มีจริงในข้อมูล แต่จัดลำดับตาม all_sev_order
     present_sev = [s for s in all_sev_order if s in df[sev_col].unique().tolist()]
     if not present_sev:
         return pd.DataFrame()
 
-    # ---------- 4) สร้าง crosstab: Incident Type Name × Severity ----------
+    # ===================== 4) Crosstab: Incident Type Name × Severity =====================
     ct = pd.crosstab(df['Incident Type Name'], df[sev_col])
 
-    # ให้มีครบทุกคอลัมน์ตาม present_sev และเรียงลำดับ
     for s in present_sev:
         if s not in ct.columns:
             ct[s] = 0
     ct = ct[present_sev]
 
-    # ---------- 5) รวม E-up, รวม A-I, ร้อยละ ----------
-    # E-up = ทุกระดับที่ "ไม่" อยู่ใน excluded
+    # ===================== 5) รวม E-up / รวม A-I / ร้อยละ =====================
     e_up_levels = [s for s in present_sev if s not in excluded]
     if e_up_levels:
         ct['รวม E-up'] = ct[e_up_levels].sum(axis=1)
     else:
         ct['รวม E-up'] = 0
 
-    # ชื่อคอลัมน์รวม ใช้ 'รวม A-I' เหมือนเดิม แม้กรณี 1–5
     ct['รวม A-I'] = ct[present_sev].sum(axis=1)
 
     with np.errstate(divide="ignore", invalid="ignore"):
         pct = (ct['รวม E-up'] / ct['รวม A-I'] * 100).replace([np.inf, np.nan], 0.0)
     ct['ร้อยละ E-up'] = pct.map(lambda x: f"{x:.2f}%")
 
-    # ---------- 6) เรียงคอลัมน์ให้สวย ----------
     final_cols = present_sev + ['รวม E-up', 'รวม A-I', 'ร้อยละ E-up']
     ct = ct[final_cols].sort_index()
 
-    # เปลี่ยนคอลัมน์ที่เป็นจำนวนให้เป็น int
-    for col in final_cols:
-        if col != 'ร้อยละ E-up':
-            ct[col] = ct[col].astype(int)
+    for col_name in final_cols:
+        if col_name != 'ร้อยละ E-up':
+            ct[col_name] = ct[col_name].astype(int)
 
     ct.index.name = 'Incident Type Name'
     return ct
+
 
 
 
