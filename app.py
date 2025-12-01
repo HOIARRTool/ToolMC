@@ -1493,26 +1493,111 @@ def create_summary_table_by_category(dataframe, category_column_name):
 
 # --- END: Helper Functions for Incident Analysis ---
 
+def create_goal_summary_table(
+    data_df_goal: pd.DataFrame,
+    goal_category_name_param: str,
+    e_up_non_numeric_levels_param=None,
+    e_up_numeric_levels_param=None,
+    is_org_safety_table: bool | None = None
+) -> pd.DataFrame:
+    """
+    สรุปอุบัติการณ์ตาม Safety Goal:
+    - เลือกแถวตามค่าในคอลัมน์ 'หมวด' (เช่น 'P:Patient Safety Goals หรือ Common Clinical Risk Incident')
+    - จัดกลุ่มตาม Incident Type (3 ตัวแรกของรหัส) แล้วแมปเป็น Incident Type Name จาก type_name
+    - นับจำนวนแยกระดับความรุนแรง (Impact หรือ Impact Level)
+    - คำนวณ รวม E-up / รวม A-I / ร้อยละ E-up
+    """
 
-def create_goal_summary_table(data_df_goal: pd.DataFrame, goal_category_name_param: str,
-                              e_up_non_numeric_levels_param=None,
-                              e_up_numeric_levels_param=None,
-                              is_org_safety_table: bool = False) -> pd.DataFrame:
-    """
-    เวอร์ชันง่าย: เลือกแถวที่ 'หมวด' มีคำขึ้นต้นตรงกับตัวอักษรก่อน colon (P/S/O)
-    แล้วสรุปจำนวนเหตุการณ์ต่อรหัส
-    """
-    if data_df_goal.empty or 'หมวด' not in data_df_goal.columns: return pd.DataFrame()
-    key = goal_category_name_param.split(":")[0].strip()  # "P" / "S" / "O"
-    sub = data_df_goal[data_df_goal['หมวด'].astype(str).str.startswith(key, na=False)].copy()
-    if sub.empty: return pd.DataFrame()
-    cnt = sub['รหัส'].value_counts().reset_index()
-    cnt.columns = ['รหัส', 'จำนวน']
-    if 'ชื่ออุบัติการณ์ความเสี่ยง' in sub.columns:
-        names = sub[['รหัส', 'ชื่ออุบัติการณ์ความเสี่ยง']].drop_duplicates()
-        cnt = cnt.merge(names, on='รหัส', how='left')
-        cnt = cnt[['รหัส', 'ชื่ออุบัติการณ์ความเสี่ยง', 'จำนวน']]
-    return cnt
+    # ไม่มีข้อมูล หรือไม่มีคอลัมน์ 'หมวด' → คืนตารางว่าง
+    if data_df_goal.empty or 'หมวด' not in data_df_goal.columns:
+        return pd.DataFrame()
+
+    df = data_df_goal.copy()
+
+    # ถ้าไม่ได้กำหนดว่าเป็น Organization Safety หรือไม่ ให้เดาจากชื่อหมวด
+    if is_org_safety_table is None:
+        is_org_safety_table = str(goal_category_name_param).strip().upper().startswith("O:")
+
+    # ตั้งค่า default ของระดับที่ "ไม่" นับเป็น E-up
+    if e_up_non_numeric_levels_param is None and not is_org_safety_table:
+        # สำหรับ Clinical / Patient / Personnel: นับ E-I เป็นรุนแรง → ตัด A-D ทิ้ง
+        e_up_non_numeric_levels_param = ['A', 'B', 'C', 'D']
+    if e_up_numeric_levels_param is None and is_org_safety_table:
+        # สำหรับ Organization Safety: นับ 3-5 เป็นรุนแรง → ตัด 1-2 ทิ้ง
+        e_up_numeric_levels_param = ['1', '2']
+
+    # ---------- 1) Filter ตามหมวด Safety Goal ให้ตรงเป๊ะ ----------
+    goal_text = str(goal_category_name_param).strip()
+    df = df[df['หมวด'].astype(str).str.strip() == goal_text]
+
+    if df.empty:
+        return pd.DataFrame()
+
+    # ---------- 2) เตรียม Incident Type Name ----------
+    if 'Incident Type' not in df.columns:
+        df['Incident Type'] = df['Incident'].astype(str).str[:3]
+
+    df['Incident Type Name'] = df['Incident Type'].map(type_name).fillna(df['Incident Type'])
+
+    # ---------- 3) เลือกคอลัมน์ความรุนแรง ----------
+    if is_org_safety_table:
+        # Organization Safety: ใช้ Impact Level (1–5)
+        if 'Impact Level' not in df.columns:
+            return pd.DataFrame()
+        sev_col = 'Impact Level'
+        df[sev_col] = df[sev_col].astype(str)
+        all_sev_order = ['1', '2', '3', '4', '5']
+        excluded = set(e_up_numeric_levels_param or [])
+    else:
+        # ที่เหลือใช้ Impact (A–I)
+        if 'Impact' not in df.columns:
+            return pd.DataFrame()
+        sev_col = 'Impact'
+        df[sev_col] = df[sev_col].astype(str).str.upper()
+        all_sev_order = list('ABCDEFGHI')
+        excluded = set(e_up_non_numeric_levels_param or [])
+
+    # เอาเฉพาะระดับความรุนแรงที่มีจริงในข้อมูล แต่จัดลำดับตาม all_sev_order
+    present_sev = [s for s in all_sev_order if s in df[sev_col].unique().tolist()]
+    if not present_sev:
+        return pd.DataFrame()
+
+    # ---------- 4) สร้าง crosstab: Incident Type Name × Severity ----------
+    ct = pd.crosstab(df['Incident Type Name'], df[sev_col])
+
+    # ให้มีครบทุกคอลัมน์ตาม present_sev และเรียงลำดับ
+    for s in present_sev:
+        if s not in ct.columns:
+            ct[s] = 0
+    ct = ct[present_sev]
+
+    # ---------- 5) รวม E-up, รวม A-I, ร้อยละ ----------
+    # E-up = ทุกระดับที่ "ไม่" อยู่ใน excluded
+    e_up_levels = [s for s in present_sev if s not in excluded]
+    if e_up_levels:
+        ct['รวม E-up'] = ct[e_up_levels].sum(axis=1)
+    else:
+        ct['รวม E-up'] = 0
+
+    # ชื่อคอลัมน์รวม ใช้ 'รวม A-I' เหมือนเดิม แม้กรณี 1–5
+    ct['รวม A-I'] = ct[present_sev].sum(axis=1)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        pct = (ct['รวม E-up'] / ct['รวม A-I'] * 100).replace([np.inf, np.nan], 0.0)
+    ct['ร้อยละ E-up'] = pct.map(lambda x: f"{x:.2f}%")
+
+    # ---------- 6) เรียงคอลัมน์ให้สวย ----------
+    final_cols = present_sev + ['รวม E-up', 'รวม A-I', 'ร้อยละ E-up']
+    ct = ct[final_cols].sort_index()
+
+    # เปลี่ยนคอลัมน์ที่เป็นจำนวนให้เป็น int
+    for col in final_cols:
+        if col != 'ร้อยละ E-up':
+            ct[col] = ct[col].astype(int)
+
+    ct.index.name = 'Incident Type Name'
+    return ct
+
 
 
 @st.cache_data
