@@ -1230,7 +1230,7 @@ def render_incidents_analysis(df: pd.DataFrame):
     
                 # เรียกใช้ฟังก์ชันที่มีอยู่แล้วในโค้ดของคุณ
                 summary_table = create_goal_summary_table(
-                    df_filtered, 
+                    df, 
                     cat_name,
                     # ถ้าเป็น Org Safety ให้ตัดระดับ 1,2 ออกจาก E-up (นับ 3-5 เป็นรุนแรง)
                     # ถ้าเป็น Safety อื่นๆ ให้ตัด A,B,C,D ออก (นับ E-I เป็นรุนแรง)
