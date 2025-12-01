@@ -2040,7 +2040,7 @@ elif selected_page == "Early Warning: อุบัติการณ์ที่
             st.dataframe(res.rename(columns={'รหัส':'Incident Code','ชื่ออุบัติการณ์ความเสี่ยง':'Incident Name','total':'Total','avg_risk':'Avg Risk','score':'Priority Score'}),
                          use_container_width=True, hide_index=True)
 
-elif selected_analysis == "บทสรุปสำหรับผู้บริหาร":
+elif selected_page == "บทสรุปสำหรับผู้บริหาร":
         st.markdown("<h4 style='color: #001f3f;'>บทสรุปสำหรับผู้บริหาร</h4>", unsafe_allow_html=True)
         st.info("กำลังประมวลผลข้อมูล... กรุณารอสักครู่")
 
