@@ -940,11 +940,12 @@ def render_incidents_analysis(df: pd.DataFrame):
         st.error(
             "ไม่สามารถแสดงข้อมูลได้ เนื่องจากไม่พบคอลัมน์ 'Resulting Actions' หรือ 'หมวดหมู่มาตรฐานสำคัญ' ในข้อมูล")
     else:
-        tab_psg9, tab_groups, tab_by_code, tab_waitlist = st.tabs(
-            ["👁️ วิเคราะห์ตามหมวดหมู่ PSG9",
-             "👁️ วิเคราะห์ตามกลุ่มหลัก (C/G)",
-             "👁️ วิเคราะห์รายรหัส",
-             "👁️ อุบัติการณ์ที่รอการแก้ไข(ตามความรุนแรง)"])
+        tab_psg9, tab_groups, tab_by_code, tab_waitlist, tab_safety_goals = st.tabs(
+                ["👁️ วิเคราะห์ตามหมวดหมู่ PSG9",
+                 "👁️ วิเคราะห์ตามกลุ่มหลัก (C/G)",
+                 "👁️ วิเคราะห์รายรหัส",
+                 "👁️ อุบัติการณ์ที่รอการแก้ไข(ตามความรุนแรง)",
+                 "👁️ วิเคราะห์ตามหมวดหมู่ Safety Goals"])
 
         # --- Tab ที่ 1: วิเคราะห์ตามหมวดหมู่ PSG9 ---
         with tab_psg9:
@@ -1206,7 +1207,45 @@ def render_incidents_analysis(df: pd.DataFrame):
                             st.dataframe(severity_df[display_cols], use_container_width=True, hide_index=True,
                                          column_config={"Occurrence Date": st.column_config.DatetimeColumn("วันที่เกิด",
                                                                                                            format="DD/MM/YYYY")})
-
+        # ----------------------------------------------------------------------
+        # เพิ่มโค้ดสำหรับ Tab ที่ 5 ตรงนี้
+        # ----------------------------------------------------------------------
+        with tab_safety_goals:
+            st.subheader("ภาพรวมอุบัติการณ์จำแนกตาม Safety Goals")
+            st.info("ตารางแสดงสถิติความรุนแรงแยกตามประเภทอุบัติการณ์ (Incident Type) ภายใต้แต่ละเป้าหมายความปลอดภัย")
+    
+            # นิยาม Mapping ระหว่างชื่อที่จะแสดง กับ ชื่อหมวดในข้อมูล (Column 'หมวด')
+            goal_definitions = {
+                "Patient Safety/ Common Clinical Risk": "P:Patient Safety Goals หรือ Common Clinical Risk Incident",
+                "Specific Clinical Risk": "S:Specific Clinical Risk Incident",
+                "Personnel Safety": "P:Personnel Safety Goals",
+                "Organization Safety": "O:Organization Safety Goals"
+            }
+    
+            for display_name, cat_name in goal_definitions.items():
+                st.markdown(f"##### {display_name}")
+    
+                # ตรวจสอบว่าเป็นหมวด Organization Safety หรือไม่ (เพราะระดับความรุนแรงใช้ 1-5 ไม่ใช่ A-I)
+                is_org_safety = (display_name == "Organization Safety")
+    
+                # เรียกใช้ฟังก์ชันที่มีอยู่แล้วในโค้ดของคุณ
+                summary_table = create_goal_summary_table(
+                    df_filtered, 
+                    cat_name,
+                    # ถ้าเป็น Org Safety ให้ตัดระดับ 1,2 ออกจาก E-up (นับ 3-5 เป็นรุนแรง)
+                    # ถ้าเป็น Safety อื่นๆ ให้ตัด A,B,C,D ออก (นับ E-I เป็นรุนแรง)
+                    e_up_non_numeric_levels_param=[] if is_org_safety else ['A', 'B', 'C', 'D'],
+                    e_up_numeric_levels_param=['1', '2'] if is_org_safety else None,
+                    is_org_safety_table=is_org_safety
+                )
+    
+                # --- แก้ไข Indentation (ย่อหน้า) ตรงนี้ ---
+                if summary_table is not None and not summary_table.empty:
+                    st.dataframe(summary_table, use_container_width=True)
+                else:  # <--- ดึงกลับมาให้ตรงกับ if
+                    st.info(f"ไม่พบข้อมูลสำหรับ '{display_name}' ในช่วงเวลาที่เลือก")
+                
+                st.markdown("---")
 
 def render_risk_matrix_interactive(df: pd.DataFrame, key_prefix: str = "main_rmx"):
     st.subheader("Risk Matrix (Interactive)")
@@ -2001,254 +2040,261 @@ elif selected_page == "Early Warning: อุบัติการณ์ที่
             st.dataframe(res.rename(columns={'รหัส':'Incident Code','ชื่ออุบัติการณ์ความเสี่ยง':'Incident Name','total':'Total','avg_risk':'Avg Risk','score':'Priority Score'}),
                          use_container_width=True, hide_index=True)
 
-elif selected_page == "บทสรุปสำหรับผู้บริหาร":
-    st.markdown("<h4 style='color: #001f3f;'>บทสรุปสำหรับผู้บริหาร</h4>", unsafe_allow_html=True)
-    if filtered.empty:
-        st.info("ไม่มีข้อมูลตามตัวกรอง")
-    else:
-        # --- START: Dependency Injection (คำนวณค่าที่จำเป็นก่อน) ---
-        # 1. คำนวณช่วงเวลา
-        min_date_filt = filtered['Occurrence Date'].min();
-        max_date_filt = filtered['Occurrence Date'].max()
-        min_date_str = min_date_filt.strftime('%d/%m/%Y') if pd.notna(min_date_filt) else "N/A"
-        max_date_str = max_date_filt.strftime('%d/%m/%Y') if pd.notna(max_date_filt) else "N/A"
-        total_month = 0
-        if pd.notna(min_date_filt) and pd.notna(max_date_filt):
-            max_p_filt = max_date_filt.to_period('M');
-            min_p_filt = min_date_filt.to_period('M')
-            total_month = max(1, (max_p_filt.year - min_p_filt.year) * 12 + (max_p_filt.month - min_p_filt.month) + 1)
+elif selected_analysis == "บทสรุปสำหรับผู้บริหาร":
+        st.markdown("<h4 style='color: #001f3f;'>บทสรุปสำหรับผู้บริหาร</h4>", unsafe_allow_html=True)
+        st.info("กำลังประมวลผลข้อมูล... กรุณารอสักครู่")
 
-        # 2. คำนวณ Metrics (ดึงมาจากหน้า Dashboard)
-        metrics_data = {}
-        metrics_data['total_processed_incidents'] = filtered.shape[0]
-        metrics_data['total_psg9_incidents_for_metric1'] = \
-        filtered[filtered['รหัส'].isin(psg9_r_codes_for_counting)].shape[0] if psg9_r_codes_for_counting else 0
-        metrics_data['total_sentinel_incidents_for_metric1'] = \
-        filtered[filtered['Sentinel code for check'].isin(sentinel_composite_keys)].shape[
-            0] if 'Sentinel code for check' in filtered.columns and sentinel_composite_keys else 0
+        # ==========================================================================================
+        # ส่วนที่ 1: เตรียมข้อมูล (Data Preparation)
+        # ==========================================================================================
 
-        severe_impact_levels_list = ['3', '4', '5']
-        df_severe_filt = filtered[filtered['Impact Level'].isin(severe_impact_levels_list)].copy()
-        metrics_data['total_severe_incidents'] = df_severe_filt.shape[0]
+        # 1.1 Executive Guide
+        executive_guide_html = """
+        <div style="background-color: #f0f7ff; border-left: 5px solid #0056b3; padding: 15px; margin-bottom: 20px; border-radius: 4px;">
+            <h3 style="margin-top: 0; color: #0056b3; border-bottom: none; font-size: 16pt;">📌 คำแนะนำการอ่านรายงานสำหรับผู้บริหาร</h3>
+            <ul style="margin-top: 5px; line-height: 1.6; font-size: 12pt;">
+                <li>🚨 <b>Sentinel Events:</b> ต้องเป็น 0 เสมอ หากมีเกิดขึ้นต้องรีบประชุมทบทวนทันที</li>
+                <li>🔴 <b>ความรุนแรงสูง (E-I & 3-5):</b> โฟกัสรายการที่ "ยังไม่แก้ไข" เพื่อติดตามความคืบหน้า</li>
+                <li>🩹 <b>ความเสี่ยงเรื้อรัง & Early Warning:</b> (สามารถดูรายละเอียดเชิงลึกได้ในเมนูวิเคราะห์เฉพาะด้านบน Sidebar)</li>
+            </ul>
+        </div>
+        """
 
-        if 'Resulting Actions' in filtered.columns:
-            unresolved_filt = df_severe_filt[df_severe_filt['Resulting Actions'].astype(str).isin(['None', '', 'nan'])]
-            metrics_data['total_severe_unresolved_incidents_val'] = unresolved_filt.shape[0]
-        else:
-            metrics_data['total_severe_unresolved_incidents_val'] = "N/A"
-
-        # 3. คำนวณ Top 10 (ดึงมาจากหน้า Sentinel)
-        df_freq = filtered['Incident'].value_counts().reset_index()
-        df_freq.columns = ['Incident', 'count']
-        # --- END: Dependency Injection ---
-
-        st.markdown(f"**เรื่อง:** รายงานสรุปอุบัติการณ์โรงพยาบาล")
-        st.markdown(f"**ช่วงข้อมูลที่วิเคราะห์:** {min_date_str} ถึง {max_date_str} (รวม {total_month} เดือน)")
-        st.markdown(f"**จำนวนอุบัติการณ์ที่พบทั้งหมด:** {metrics_data.get('total_processed_incidents', 0):,} รายการ")
-        st.markdown("---")
-
-        # --- 1. แดชบอร์ดสรุปภาพรวม ---
-        st.subheader("1. แดชบอร์ดสรุปภาพรวม")
-        col1_m, col2_m, col3_m, col4_m, col5_m = st.columns(5)
-        with col1_m:
-            st.metric("อุบัติการณ์ทั้งหมด", f"{metrics_data.get('total_processed_incidents', 0):,}")
-        with col2_m:
-            st.metric("Sentinel Events", f"{metrics_data.get('total_sentinel_incidents_for_metric1', 0):,}")
-        with col3_m:
-            st.metric("มาตรฐานสำคัญฯ 9 ข้อ", f"{metrics_data.get('total_psg9_incidents_for_metric1', 0):,}")
-        with col4_m:
-            st.metric("ความรุนแรงสูง (E-I & 3-5)", f"{metrics_data.get('total_severe_incidents', 0):,}")
-        with col5_m:
-            val_unresolved = metrics_data.get('total_severe_unresolved_incidents_val', 'N/A')
-            st.metric("รุนแรงสูง & ยังไม่แก้ไข",
-                      f"{val_unresolved:,}" if isinstance(val_unresolved, int) else val_unresolved)
-        st.markdown("---")
-
-        # --- 2. Risk Matrix และ Top 10 อุบัติการณ์ ---
-        st.subheader("2. Risk Matrix และ Top 10 อุบัติการณ์")
-        col_matrix, col_top10 = st.columns(2)
-        with col_matrix:
-            st.markdown("##### Risk Matrix")
-            impact_level_keys = ['5', '4', '3', '2', '1']
-            freq_level_keys = ['1', '2', '3', '4', '5']
-            matrix_df = filtered[
-                filtered['Impact Level'].isin(impact_level_keys) & filtered['Frequency Level'].isin(
-                    freq_level_keys)]
-            if not matrix_df.empty:
-                matrix_data = pd.crosstab(matrix_df['Impact Level'], matrix_df['Frequency Level'])
-                matrix_data = matrix_data.reindex(index=impact_level_keys, columns=freq_level_keys, fill_value=0)
-                impact_labels = {'5': "5 (Extreme)", '4': "4 (Major)", '3': "3 (Moderate)", '2': "2 (Minor)",
-                                 '1': "1 (Insignificant)"}
-                freq_labels = {'1': "F1", '2': "F2", '3': "F3", '4': "F4", '5': "F5"}
-                st.table(matrix_data.rename(index=impact_labels, columns=freq_labels))
-            else:
-                st.info("ไม่มีข้อมูลสำหรับ Risk Matrix")
-        with col_top10:
-            st.markdown("##### Top 10 อุบัติการณ์ (ตามความถี่)")
-            if not df_freq.empty:
-                df_freq_top10 = df_freq.nlargest(10, 'count').copy()
-                display_top10 = pd.merge(df_freq_top10,
-                                         filtered[['Incident', 'ชื่ออุบัติการณ์ความเสี่ยง']].drop_duplicates(),
-                                         on='Incident', how='left')
-                # แสดงแค่ รหัส และ จำนวน (ตามโค้ดเดิม)
-                st.dataframe(display_top10[['Incident', 'count']], hide_index=True,
-                             use_container_width=True,
-                             column_config={"Incident": "รหัส",
-                                            "count": "จำนวน"})
-            else:
-                st.info("ไม่มีข้อมูล Top 10")
-        st.markdown("---")
-
-        # --- 3. รายการ Sentinel Events ---
-        st.subheader("3. รายการ Sentinel Events")
-        if 'Sentinel code for check' in filtered.columns:
-            sentinel_events_df = filtered[filtered['Sentinel code for check'].isin(sentinel_composite_keys)]
+        # 1.2 Sentinel Events -> HTML
+        sentinel_html = "<p style='color:#888;'>ไม่พบ Sentinel Events ในช่วงเวลาที่เลือก</p>"
+        if 'Sentinel code for check' in df_filtered.columns and 'sentinel_composite_keys' in globals():
+            sentinel_events_df = df_filtered[df_filtered['Sentinel code for check'].isin(sentinel_composite_keys)]
             if not sentinel_events_df.empty:
-                st.dataframe(
-                    sentinel_events_df[['Occurrence Date', 'Incident', 'Impact', 'รายละเอียดการเกิด_Anonymized']],
-                    hide_index=True, use_container_width=True,
-                    column_config={"Occurrence Date": "วันที่เกิด", "Incident": "รหัส", "Impact": "ระดับ",
-                                   "รายละเอียดการเกิด_Anonymized": "รายละเอียด"})
-            else:
-                st.info("ไม่พบ Sentinel Events ในช่วงเวลาที่เลือก")
-        else:
-            st.warning("ตรวจสอบ Sentinel ไม่ได้")
-        st.markdown("---")
+                sentinel_cols = ['Occurrence Date', 'Incident', 'Impact', 'รายละเอียดการเกิด_Anonymized']
+                sent_disp = sentinel_events_df[sentinel_cols].copy()
+                sent_disp['Occurrence Date'] = sent_disp['Occurrence Date'].dt.strftime('%d/%m/%Y')
+                sentinel_html = sent_disp.to_html(classes="styled-table", index=False, table_id="sentinel-table")
 
-        # --- 4. PSG9 Summary ---
-        st.subheader("4. วิเคราะห์ตามหมวดหมู่ มาตรฐานสำคัญจำเป็นต่อความปลอดภัย 9 ข้อ")
-        # (เรียกใช้ฟังก์ชัน Helper ที่เราซ่อมไปแล้ว)
-        psg9_summary_table = create_psg9_summary_table(filtered)
+        # 1.3 Top 10 -> HTML
+        top10_html = "<p>ไม่มีข้อมูล</p>"
+        if not df_freq.empty:
+            top10_df = df_freq.nlargest(10, 'count').copy()
+            incident_names = df_filtered[['Incident', 'ชื่ออุบัติการณ์ความเสี่ยง']].drop_duplicates()
+            top10_df = pd.merge(top10_df, incident_names, on='Incident', how='left')
+            top10_display = top10_df[['Incident', 'ชื่ออุบัติการณ์ความเสี่ยง', 'count']].rename(
+                columns={'Incident': 'รหัส', 'ชื่ออุบัติการณ์ความเสี่ยง': 'ชื่ออุบัติการณ์', 'count': 'จำนวน'}
+            )
+            top10_html = top10_display.to_html(classes="styled-table", index=False, table_id="top10-table")
+
+        # 1.4 PSG9 Summary -> HTML
+        psg9_html = "<p style='color:#888;'>ไม่พบข้อมูล PSG9</p>"
+        psg9_summary_table = create_psg9_summary_table(df_filtered)
         if psg9_summary_table is not None and not psg9_summary_table.empty:
-            st.table(psg9_summary_table)
-        else:
-            st.info("ไม่พบข้อมูลอุบัติการณ์ที่เกี่ยวข้องกับ PSG9 ในช่วงเวลานี้")
-        st.markdown("---")
+            psg9_html = psg9_summary_table.to_html(classes="styled-table", table_id="psg9-table")
 
-        # --- 5. รายการอุบัติการณ์รุนแรงที่ยังไม่ถูกแก้ไข ---
-        st.subheader("5. รายการอุบัติการณ์รุนแรง (E-I & 3-5) ที่ยังไม่ถูกแก้ไข")
-        if 'Resulting Actions' in filtered.columns:
-            unresolved_severe_df = filtered[
-                filtered['Impact Level'].isin(['3', '4', '5']) &
-                filtered['Resulting Actions'].astype(str).isin(['None', '', 'nan'])
-                ]
-            if not unresolved_severe_df.empty:
-                display_cols_unresolved = ['Occurrence Date', 'Incident', 'Impact', 'รายละเอียดการเกิด_Anonymized']
-                st.dataframe(
-                    unresolved_severe_df[display_cols_unresolved],
-                    hide_index=True,
-                    use_container_width=True,
-                    column_config={
-                        "Occurrence Date": st.column_config.DatetimeColumn(
-                            "วันที่เกิด",
-                            format="DD/MM/YYYY",
-                        ),
-                        "Incident": "รหัส",
-                        "Impact": "ระดับ",
-                        "รายละเอียดการเกิด_Anonymized": "รายละเอียด"
-                    }
-                )
-            else:
-                st.info("ไม่พบอุบัติการณ์รุนแรงที่ยังไม่ถูกแก้ไขในช่วงเวลานี้")
-        st.markdown("---")
-
-        # --- 6. สรุปอุบัติการณ์ตามเป้าหมาย Safety Goals ---
-        st.subheader("6. สรุปอุบัติการณ์ตามเป้าหมาย Safety Goals")
-        # (goal_definitions ถูกนิยามไว้ใน Section 5)
+        # 1.5 Safety Goals -> HTML
+        safety_goals_html = ""
+        goal_definitions = {
+            "Patient Safety/ Common Clinical Risk": "P:Patient Safety Goals หรือ Common Clinical Risk Incident",
+            "Specific Clinical Risk": "S:Specific Clinical Risk Incident",
+            "Personnel Safety": "P:Personnel Safety Goals", 
+            "Organization Safety": "O:Organization Safety Goals"
+        }
         for display_name, cat_name in goal_definitions.items():
-            st.markdown(f"##### {display_name}")
-
-            # --- ปรับแก้ ---
-            # เรียกใช้ฟังก์ชันเวอร์ชัน "ง่าย" ที่เรามีใน Section 7
-            # โดยตัดพารามิเตอร์ที่ไม่มีในฟังก์ชัน (e_up..., is_org_safety) ทิ้งไป
-            summary_table = create_goal_summary_table(filtered, cat_name)
-
-            if summary_table is not None and not summary_table.empty:
-                # ใช้ st.dataframe แทน st.table เพื่อให้รองรับตารางยาวๆ ได้ดีกว่า
-                st.dataframe(summary_table, use_container_width=True, hide_index=True)
-            else:
-                st.info(f"ไม่มีข้อมูลสำหรับ '{display_name}'")
-        st.markdown("---")
-
-        # --- 7. Early Warning (Top 5) ---
-        st.subheader("7. Early Warning: อุบัติการณ์ที่มีแนวโน้มสูงขึ้น (Top 5)")
-        st.write(
-            "แสดง Top 5 อุบัติการณ์ที่ถูกจัดลำดับความสำคัญสูงสุด โดยพิจารณาจากความถี่และความรุนแรงเฉลี่ย")
-
-        # --- ปรับแก้ ---
-        # เรียกใช้ฟังก์ชันเวอร์ชัน "ง่าย" (stub) ที่เรามีใน Section 7
-        # โดยตัดพารามิเตอร์ที่ไม่มี (min_months, min_total) ทิ้ง
-        early_warning_df = prioritize_incidents_nb_logit_v2(filtered, horizon=3)
-
-        if not early_warning_df.empty:
-            top_ew_incidents = early_warning_df.head(5).copy()
-
-            # ปรับแก้คอลัมน์ที่แสดงผล ให้ตรงกับผลลัพธ์จากฟังก์ชันเวอร์ชัน "ง่าย"
-            display_ew_df = top_ew_incidents.rename(
-                columns={'ชื่ออุบัติการณ์ความเสี่ยง': 'ชื่ออุบัติการณ์',
-                         'score': 'คะแนนความสำคัญ'})
-
-            # ตัดคอลัมน์ 'คาดการณ์เหตุรุนแรง (3 ด.)' ที่ไม่มีในเวอร์ชันง่ายทิ้งไป
-            st.dataframe(
-                display_ew_df[['รหัส', 'ชื่ออุบัติการณ์', 'คะแนนความสำคัญ']],
-                column_config={
-                    "คะแนนความสำคัญ": st.column_config.ProgressColumn("คะแนนความสำคัญ", format="%.3f", min_value=0,
-                                                                      max_value=float(
-                                                                          display_ew_df['คะแนนความสำคัญ'].max())),
-                },
-                use_container_width=True, hide_index=True
+            is_org = (display_name == "Organization Safety")
+            table = create_goal_summary_table(
+                df_filtered, cat_name,
+                e_up_non_numeric_levels_param=[] if is_org else ['A', 'B', 'C', 'D'],
+                e_up_numeric_levels_param=['1', '2'] if is_org else None,
+                is_org_safety_table=is_org
             )
-        else:
-            st.info("ไม่มีข้อมูลเพียงพอสำหรับวิเคราะห์ Early Warning")
-        st.markdown("---")
+            if table is not None and not table.empty:
+                safety_goals_html += f"<h4>{display_name}</h4>" + table.to_html(classes="styled-table")
 
-        # --- 8. สรุปอุบัติการณ์ที่เป็นปัญหาเรื้อรัง (Top 5) ---
-        st.subheader("8. สรุปอุบัติการณ์ที่เป็นปัญหาเรื้อรัง (Persistence Risk - Top 5)")
-        st.write("แสดง Top 5 อุบัติการณ์ที่เกิดขึ้นบ่อยและมีความรุนแรงเฉลี่ยสูง ซึ่งควรทบทวนเชิงระบบ")
-        persistence_df_exec = calculate_persistence_risk_score(filtered, total_month)
-        if not persistence_df_exec.empty:
-            top_persistence_incidents = persistence_df_exec.head(5)
-            display_df_persistence = top_persistence_incidents.rename(
-                columns={'Persistence_Risk_Score': 'ดัชนีความเรื้อรัง',
-                         'Average_Ordinal_Risk_Score': 'คะแนนเสี่ยงเฉลี่ย'})
-            st.dataframe(
-                display_df_persistence[['รหัส', 'ชื่ออุบัติการณ์ความเสี่ยง', 'คะแนนเสี่ยงเฉลี่ย', 'ดัชนีความเรื้อรัง']],
-                column_config={
-                    "คะแนนเสี่ยงเฉลี่ย": st.column_config.NumberColumn(format="%.2f"),
-                    "ดัชนีความเรื้อรัง": st.column_config.ProgressColumn("ดัชนีความเรื้อรัง", min_value=0, max_value=2,
-                                                                         format="%.2f")
-                },
-                use_container_width=True,
-                hide_index=True  # เพิ่ม hide_index
-            )
-        else:
-            st.info("ไม่มีข้อมูลเพียงพอสำหรับวิเคราะห์ความเสี่ยงเรื้อรัง")
+        # 1.6 Unresolved Severe -> HTML
+        unresolved_severe_html = "<p style='color:#888;'>เยี่ยมมาก! ไม่พบอุบัติการณ์รุนแรงค้างดำเนินการ</p>"
+        if 'Resulting Actions' in df_filtered.columns:
+            unresolved_df = df_filtered[
+                df_filtered['Impact Level'].isin(['3', '4', '5']) & 
+                df_filtered['Resulting Actions'].astype(str).isin(['None', '', 'nan'])
+            ].copy()
+            if not unresolved_df.empty:
+                unresolved_df['Occurrence Date'] = unresolved_df['Occurrence Date'].dt.strftime('%d/%m/%Y')
+                unresolved_severe_html = unresolved_df[['Occurrence Date', 'Incident', 'Impact', 'รายละเอียดการเกิด_Anonymized']].to_html(classes="styled-table", index=False, table_id="unresolved-table")
 
-# =========================
-# 9) Download ผลลัพธ์ (Main Area, uses 'filtered')
-# =========================
-@st.cache_data
-def _to_csv_bytes(df: pd.DataFrame) -> bytes:
-    cols_for_download = [
-        'เลขที่รับ', 'หน่วยงาน', 'วัน-เวลา ที่รายงาน', 'สถานที่เกิดเหตุ',
-        'Occurrence Date', 'Incident', 'ชื่ออุบัติการณ์ความเสี่ยง', 'Impact', 'Impact Level',
-        'Frequency Level', 'Risk Level', 'Category Color', 'กลุ่มงาน', 'หมวด',
-        'รายละเอียดการเกิด', 'Resulting Actions', 'หน่วยงาน_norm',
-        'FY_int', 'FQuarter', 'FY_Quarter',
-        'รหัส',
-    ]
-    cols_present_for_download = [c for c in cols_for_download if c in df.columns]
-    try:
-        return df[cols_present_for_download].to_csv(index=False).encode("utf-8-sig")
-    except Exception as e:
-        st.error(f"Error creating CSV for download: {e}")
-        return b""
+        # 1.7 Risk Matrix Data -> HTML (Optional Display)
+        # ส่วนนี้เตรียมไว้เผื่อจะแสดงตาราง Matrix ในรายงาน แต่ใน HTML Template ด้านล่างยังไม่ได้เรียกใช้ตัวแปรนี้
+        # หากต้องการแสดง ให้เพิ่ม {matrix_data_html} ลงใน html_string
+        impact_level_keys = ['5', '4', '3', '2', '1']
+        freq_level_keys = ['1', '2', '3', '4', '5']
+        matrix_df = df_filtered[
+            df_filtered['Impact Level'].isin(impact_level_keys) & 
+            df_filtered['Frequency Level'].isin(freq_level_keys)
+        ]
+        matrix_data_html = "<p>ไม่มีข้อมูล</p>"
+        if not matrix_df.empty:
+            matrix_data = pd.crosstab(matrix_df['Impact Level'], matrix_df['Frequency Level'])
+            matrix_data = matrix_data.reindex(index=impact_level_keys, columns=freq_level_keys, fill_value=0)
+            impact_labels = {'5': "5 (Ext)", '4': "4 (Maj)", '3': "3 (Mod)", '2': "2 (Min)", '1': "1 (Ins)"}
+            freq_labels = {'1': "F1", '2': "F2", '3': "F3", '4': "F4", '5': "F5"}
+            matrix_data_html = matrix_data.rename(index=impact_labels, columns=freq_labels).to_html(classes="styled-table", table_id="risk-matrix-table")
 
-if not filtered.empty:
-    st.markdown("---")
-    st.download_button(
-        "ดาวน์โหลดผลลัพธ์ที่กรองแล้ว (CSV)",
-        data=_to_csv_bytes(filtered),
-        file_name="filtered_result.csv",
-        mime="text/csv"
-    )
+        # ==========================================================================================
+        # ส่วนที่ 2: ประกอบร่าง HTML (HTML Assembly)
+        # ==========================================================================================
+        
+        html_string = f"""
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <style>            
+                @page {{ 
+                    size: A4; 
+                    margin: 1.5cm 2cm; 
+                    @bottom-center {{ 
+                        content: "หน้า " counter(page) " / " counter(pages); 
+                        font-family: "TH SarabunPSK", sans-serif; 
+                        font-size: 12pt; 
+                        color: #888; 
+                    }} 
+                }}
+                
+                * {{ box-sizing: border-box; }}
+
+                body {{ font-family: "TH SarabunPSK", sans-serif; font-size: 16pt; line-height: 1.3; }}
+                
+                h1 {{ font-size: 26pt; color: #001f3f; margin-bottom: 15px; margin-top: 0; padding-top: 0; }}
+                h2 {{ font-size: 20pt; color: #001f3f; border-bottom: 2px solid #001f3f; padding-bottom: 5px; margin-top: 25px; }}
+                h3 {{ font-size: 18pt; color: #003366; margin-top: 15px; margin-bottom: 10px; }}
+                h4 {{ font-size: 16pt; color: #444; margin-top: 10px; margin-bottom: 5px; font-weight: bold; background-color: #eee; padding: 5px; }}
+                
+                .styled-table {{ 
+                    width: 100%; 
+                    border-collapse: collapse; 
+                    margin-top: 5px; 
+                    table-layout: fixed; 
+                    font-size: 14pt; 
+                }}
+                
+                .styled-table th, .styled-table td {{ 
+                    border: 1px solid #ddd; 
+                    padding: 6px; 
+                    text-align: left; 
+                    word-wrap: break-word; 
+                    vertical-align: top; 
+                }}
+                
+                .styled-table th {{ background-color: #f2f2f2; font-weight: bold; color: #333; }}
+                
+                .metric-container {{ 
+                    display: flex; 
+                    justify-content: space-between; 
+                    padding: 10px; 
+                    background-color: #f8f9fa; 
+                    border-radius: 8px; 
+                    border: 1px solid #e9ecef; 
+                    margin-bottom: 15px; 
+                }}
+                .metric {{ text-align: center; width: 19%; }}
+                .metric-label {{ font-size: 13pt; color: #666; margin-bottom: 2px; }}
+                .metric-value {{ font-size: 20pt; font-weight: bold; color: #0056b3; }}
+                
+                /* Column Widths */
+                #sentinel-table th:nth-child(1), #sentinel-table td:nth-child(1) {{ width: 12%; }} 
+                #sentinel-table th:nth-child(2), #sentinel-table td:nth-child(2) {{ width: 10%; }} 
+                #sentinel-table th:nth-child(3), #sentinel-table td:nth-child(3) {{ width: 8%; text-align: center; }} 
+                #sentinel-table th:nth-child(4), #sentinel-table td:nth-child(4) {{ width: 70%; }} 
+
+                #top10-table th:nth-child(1), #top10-table td:nth-child(1) {{ width: 15%; text-align: center; }} 
+                #top10-table th:nth-child(2), #top10-table td:nth-child(2) {{ width: 70%; }} 
+                #top10-table th:nth-child(3), #top10-table td:nth-child(3) {{ width: 15%; text-align: center; }} 
+
+                #psg9-table th:nth-child(1), #psg9-table td:nth-child(1) {{ width: 40%; text-align: left; }} 
+                #psg9-table th:nth-child(n+2):nth-child(-n+10), #psg9-table td:nth-child(n+2):nth-child(-n+10) {{ width: 3.5%; text-align: center; padding: 4px 2px; }} 
+                #psg9-table th:nth-child(n+11):nth-child(-n+12), #psg9-table td:nth-child(n+11):nth-child(-n+12) {{ width: 7%; text-align: center; }} 
+                #psg9-table th:last-child, #psg9-table td:last-child {{ width: 12%; text-align: center; }}
+
+                #unresolved-table th:nth-child(1), #unresolved-table td:nth-child(1) {{ width: 14%; }} 
+                #unresolved-table th:nth-child(2), #unresolved-table td:nth-child(2) {{ width: 10%; }} 
+                #unresolved-table th:nth-child(3), #unresolved-table td:nth-child(3) {{ width: 8%; text-align: center; }} 
+                #unresolved-table th:nth-child(4), #unresolved-table td:nth-child(4) {{ width: 68%; }} 
+
+                @media print {{
+                    .no-print {{ display: none !important; }}
+                    body {{ -webkit-print-color-adjust: exact; margin: 0; padding: 0; }}
+                }}
+                .print-btn {{
+                    background-color: #007bff; color: white; border: none; padding: 10px 20px; 
+                    border-radius: 5px; cursor: pointer; font-size: 16pt; margin-bottom: 20px;
+                    display: block; width: 100%; text-align: center; text-decoration: none;
+                }}
+                .print-btn:hover {{ background-color: #0056b3; }}
+            </style>
+        </head>
+        <body>
+            <button class="print-btn no-print" onclick="window.print()">🖨️ พิมพ์รายงานนี้ / บันทึกเป็น PDF</button>
+
+            <div style="text-align: right; color: #888; font-size: 12pt;">พิมพ์เมื่อ: {datetime.now().strftime('%d/%m/%Y')}</div>
+            <h1>บทสรุปสำหรับผู้บริหาร (Executive Summary)</h1>
+            <p><b>ช่วงข้อมูล:</b> {min_date_str} ถึง {max_date_str} ({total_month} เดือน) | <b>จำนวนรวม:</b> {metrics_data.get('total_processed_incidents', 0):,} รายการ</p>
+            
+            {executive_guide_html}
+
+            <h2>1. แดชบอร์ดสรุปภาพรวม</h2>
+            <div class="metric-container">
+                <div class="metric"><div class="metric-label">ทั้งหมด</div><div class="metric-value">{metrics_data.get('total_processed_incidents', 0):,}</div></div>
+                <div class="metric"><div class="metric-label" style="color: #dc3545;">Sentinel</div><div class="metric-value" style="color: #dc3545;">{metrics_data.get('total_sentinel_incidents_for_metric1', 0):,}</div></div>
+                <div class="metric"><div class="metric-label">PSG9</div><div class="metric-value">{metrics_data.get('total_psg9_incidents_for_metric1', 0):,}</div></div>
+                <div class="metric"><div class="metric-label">รุนแรงสูง</div><div class="metric-value">{metrics_data.get('total_severe_incidents', 0):,}</div></div>
+                <div class="metric"><div class="metric-label" style="color: #ffc107;">ยังไม่แก้ไข</div><div class="metric-value" style="color: #ffc107;">{metrics_data.get('total_severe_unresolved_incidents_val', 'N/A')}</div></div>
+            </div>
+
+            <h2>2. รายการ Sentinel Events (เหตุการณ์ไม่พึงประสงค์ร้ายแรง)</h2>
+            {sentinel_html}
+
+            <h2>3. Top 10 อุบัติการณ์ที่พบบ่อยที่สุด</h2>
+            {top10_html}
+
+            <div style="page-break-inside: avoid;">
+                <h2>4. วิเคราะห์ตามมาตรฐานสำคัญ (PSG9)</h2>
+                {psg9_html}
+            </div>
+
+            <h2>5. สรุปอุบัติการณ์ตาม Safety Goals</h2>
+            {safety_goals_html}
+
+            <h2>6. อุบัติการณ์รุนแรงค้างดำเนินการ</h2>
+            {unresolved_severe_html}
+        </body>
+        </html>
+        """
+
+        # ==========================================================================================
+        # ส่วนที่ 3: แสดงผล (Display)
+        # ==========================================================================================
+        
+        st.success("✅ สร้างรายงานเรียบร้อยแล้ว")
+        
+        import streamlit.components.v1 as components
+        preview_html = f"""
+        <div style="
+            border: 1px solid #ccc; 
+            padding: 40px; 
+            width: 100%; 
+            background-color: white; 
+            box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2); 
+            margin-bottom: 20px;">
+            {html_string}
+        </div>
+        """
+        components.html(preview_html, height=1200, scrolling=True)
+
+# ==============================================================================
+# MAIN FUNCTION (ส่วนปิดท้ายไฟล์ที่ต้องมี)
+# ==============================================================================
+def main():
+    # รับ query params เพื่อรองรับการลิงก์ไปหน้า admin (ถ้ามี)
+    page = st.query_params.get("page", "executive")
+    
+    if page == "admin":
+        display_admin_page()
+    else:
+        display_executive_dashboard()
+
+if __name__ == "__main__":
+    main()
