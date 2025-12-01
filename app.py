@@ -639,30 +639,26 @@ colors2 = np.array([["#e1f5fe","#f6c8b6","#dd191d","#dd191d","#dd191d","#dd191d"
                     ["#e1f5fe","#f6c8b6","#42db41","#42db41","#42db41","#ffee58","#ffee58"],
                     ["#e1f5fe","#f6c8b6","#f6c8b6","#f6c8b6","#f6c8b6","#f6c8b6","#f6c8b6"],
                     ["#e1f5fe","#e1f5fe","#e1f5fe","#e1f5fe","#e1f5fe","#e1f5fe","#e1f5fe"]])
-def display_executive_dashboard():
-    # --- 1. สร้าง Sidebar และเมนูเลือกหน้า ---
-    st.sidebar.markdown(
-        f"""<div style="display: flex; align-items: center; margin-bottom: 1rem;">
-        <img src="{LOGO_URL}" style="height: 32px; margin-right: 10px;">
-        <h2 style="margin: 0; font-size: 1.7rem;">
-            <span class="gradient-text">HOIA-RR Menu</span>
-        </h2></div>""",
-        unsafe_allow_html=True
-    )
 
-    # --- Upload ---
-    st.header("อัปโหลดข้อมูล")
-    up = st.file_uploader(
+def display_executive_dashboard():
+    # --- ลบส่วนสร้าง Sidebar Menu ออก (เพราะย้ายไปทำใน render_dashboard_interface แล้ว) ---
+    
+    # =========================
+    # ส่วนอัปโหลดข้อมูล (Data Upload)
+    # =========================
+    # ย้าย File Uploader ไปไว้ใน Sidebar เพื่อความสวยงาม (หรือจะไว้หน้าหลักก็ได้)
+    st.sidebar.header("1. อัปโหลดข้อมูล") 
+    up = st.sidebar.file_uploader(
         "อัปโหลดไฟล์ (.xlsx)",
         type=["csv", "xlsx", "xls"],
-        key="main_uploader"
+        key="main_uploader" 
     )
 
     # =========================
     # 6) ประมวลผล (Main Processing Logic)
     # =========================
     df_main = pd.DataFrame()
-    processed_data_loaded = False  # ใช้ติดตามสถานะการโหลด
+    processed_data_loaded = False 
 
     # --- Logic 1: ถ้ามีการอัปโหลดไฟล์ ให้ใช้ไฟล์นั้นก่อน ---
     if up is not None:
@@ -681,18 +677,16 @@ def display_executive_dashboard():
     # --- Logic 2: หากไม่มีการอัปโหลด ให้โหลดจาก URL ตั้งต้น ---
     else:
         DEFAULT_DATA_URL = "https://raw.githubusercontent.com/HOIARRTool/ToolMC/main/jib.xlsx"
-        st.sidebar.info("ไม่ได้อัปโหลดไฟล์, กำลังโหลดข้อมูลตั้งต้น...")
+        st.sidebar.info("ใช้ข้อมูลตัวอย่าง (GitHub)")
 
         try:
-            with st.spinner("กำลังโหลดข้อมูลตั้งต้นจาก GitHub..."):
+            with st.spinner("กำลังโหลดข้อมูลตั้งต้น..."):
                 raw_df = pd.read_excel(DEFAULT_DATA_URL, engine="openpyxl")
                 df_main = massage_schema(raw_df)
                 df_main = add_time_parts_fiscal(df_main)
                 processed_data_loaded = True
-                st.sidebar.success("โหลดข้อมูลตั้งต้นสำเร็จ")
         except Exception as e:
-            st.sidebar.error(f"โหลดข้อมูลตั้งต้นจาก URL ไม่สำเร็จ: {e}")
-            st.sidebar.caption(f"URL: {DEFAULT_DATA_URL}")
+            st.sidebar.error(f"โหลดข้อมูลตั้งต้นไม่สำเร็จ: {e}")
             df_main = pd.DataFrame()
             processed_data_loaded = False
 
@@ -702,10 +696,7 @@ def display_executive_dashboard():
     if processed_data_loaded:
         # 1) ถ้าไม่มีคอลัมน์ "หน่วยงาน" ให้พยายามแมปจากชื่ออื่น
         if "หน่วยงาน" not in df_main.columns:
-            alt_names = [
-                "หน่วยงาน/แผนก", "ฝ่าย/หน่วยงาน", "แผนก",
-                "หน่วยงานที่เกิดเหตุ", "Department", "หน่วย"
-            ]
+            alt_names = ["หน่วยงาน/แผนก", "ฝ่าย/หน่วยงาน", "แผนก", "หน่วยงานที่เกิดเหตุ", "Department", "หน่วย"]
             found = None
             for c in alt_names:
                 if c in df_main.columns:
@@ -723,43 +714,38 @@ def display_executive_dashboard():
             else:
                 df_main["กลุ่มงาน"] = "N/A"
 
-    # ถ้าโหลดข้อมูลไม่สำเร็จ หรือ df_main ว่าง -> แจ้งเตือนและคืนค่าว่าง
+    # ถ้าโหลดข้อมูลไม่สำเร็จ หรือ df_main ว่าง -> คืนค่าว่าง
     if (not processed_data_loaded) or df_main.empty:
-        st.info("👈 กรุณาอัปโหลดไฟล์ข้อมูล (หรือระบบไม่สามารถโหลดข้อมูลตั้งต้นได้)")
+        st.info("👈 กรุณาอัปโหลดไฟล์ข้อมูลทางซ้ายมือ")
         return pd.DataFrame() 
 
     # =========================
-    # ตัวกรองหลัก
+    # ตัวกรองหลัก (Filters)
     # =========================
-    st.header("ตัวกรองหลัก")
-    GROUP_OPTIONS = ["-- เลือกกลุ่มงาน --", "-- ทั้งหมด --"] + sorted(
-        REF_DF["กลุ่มงาน"].unique().tolist()
-    )
-    sel_group = st.selectbox("เลือกกลุ่มงาน", GROUP_OPTIONS, index=1)
+    st.sidebar.markdown("---")
+    st.sidebar.header("2. ตัวกรองข้อมูล")
+    
+    # 1. กรองกลุ่มงาน
+    GROUP_OPTIONS = ["-- เลือกกลุ่มงาน --", "-- ทั้งหมด --"] + sorted(REF_DF["กลุ่มงาน"].unique().tolist())
+    sel_group = st.sidebar.selectbox("เลือกกลุ่มงาน", GROUP_OPTIONS, index=1)
 
+    # 2. กรองหน่วยงาน (ขึ้นอยู่กับกลุ่มงาน)
     if sel_group == "-- ทั้งหมด --":
         sel_unit = "-- ทั้งหมด --"
-        st.selectbox("เลือกหน่วยงาน", ["-- ทั้งหมด --"], index=0, disabled=True)
+        st.sidebar.selectbox("เลือกหน่วยงาน", ["-- ทั้งหมด --"], index=0, disabled=True)
     else:
         unit_options = list_units(sel_group)
-        sel_unit = st.selectbox(
+        sel_unit = st.sidebar.selectbox(
             "เลือกหน่วยงาน",
             ["-- ทั้งหมด --"] + unit_options,
             index=0,
             disabled=(sel_group in ("", "-- เลือกกลุ่มงาน --"))
         )
 
-    # =========================
-    # ตัวกรองช่วงเวลา (ปีงบประมาณ)
-    # =========================
-    st.header("ตัวกรองช่วงเวลา (ปีงบประมาณ)")
-    period_mode = st.selectbox(
-        "โหมดช่วงเวลา",
-        ["ทั้งหมด", "รายปี", "รายไตรมาส", "รายเดือน"],
-        index=0
-    )
+    # 3. ตัวกรองช่วงเวลา
+    period_mode = st.sidebar.selectbox("โหมดช่วงเวลา", ["ทั้งหมด", "รายปี", "รายไตรมาส", "รายเดือน"], index=0)
 
-    # --- สร้างตัวเลือกปีงบฯ และเดือน จาก df_main ---
+    # สร้างตัวเลือกปี/เดือน
     fy_opts = ["-- ทั้งหมด --"]
     if "FY_int" in df_main.columns:
         fy_opts += sorted(df_main["FY_int"].astype(str).unique().tolist())
@@ -769,66 +755,33 @@ def display_executive_dashboard():
     if "Month_int" in df_main.columns:
         month_opts += [f"{m:02d}-{TH_MONTH_TINY.get(m, '?')}" for m in month_order]
 
-    # --- ส่วนเลือกช่วงเวลาบน Sidebar ---
-    with st.sidebar:
-        sel_fy = None
-        sel_fq = None
-        sel_month_num = None
+    sel_fy, sel_fq, sel_month_num = None, None, None
 
-        if period_mode == "รายปี":
-            sel_fy = st.selectbox("เลือกปีงบประมาณ", fy_opts, index=0)
+    if period_mode == "รายปี":
+        sel_fy = st.sidebar.selectbox("เลือกปีงบประมาณ", fy_opts, index=0)
+    elif period_mode == "รายไตรมาส":
+        c1, c2 = st.sidebar.columns(2)
+        sel_fy = c1.selectbox("ปีงบฯ", fy_opts, index=0, key="fq_year")
+        sel_fq = c2.selectbox("ไตรมาส", ["-- ทั้งหมด --", "Q1", "Q2", "Q3", "Q4"], index=0, key="fq_quarter")
+    elif period_mode == "รายเดือน":
+        c1, c2 = st.sidebar.columns(2)
+        sel_fy = c1.selectbox("ปีงบฯ", fy_opts, index=0, key="fm_year")
+        month_label_select = c2.selectbox("เดือน", month_opts, index=0, key="fm_month")
+        if month_label_select not in (None, "", "-- ทั้งหมด --"):
+            sel_month_num = int(month_label_select.split("-")[0])
 
-        elif period_mode == "รายไตรมาส":
-            c1, c2 = st.columns(2)
-            with c1:
-                sel_fy = st.selectbox("ปีงบประมาณ", fy_opts, index=0, key="fq_year")
-            with c2:
-                sel_fq = st.selectbox("ไตรมาส", ["-- ทั้งหมด --", "Q1", "Q2", "Q3", "Q4"], index=0, key="fq_quarter")
-
-        elif period_mode == "รายเดือน":
-            c1, c2 = st.columns(2)
-            with c1:
-                sel_fy = st.selectbox("ปีงบประมาณ", fy_opts, index=0, key="fm_year")
-            with c2:
-                month_label_select = st.selectbox("เดือน", month_opts, index=0, key="fm_month")
-                if month_label_select not in (None, "", "-- ทั้งหมด --"):
-                    sel_month_num = int(month_label_select.split("-")[0])
-
-    # --- ใช้ตัวกรองเวลา + กลุ่ม/หน่วย ---
+    # --- Apply Filters ---
     df_time = filter_by_period_fiscal(df_main, period_mode, fy=sel_fy, fq=sel_fq, m=sel_month_num)
     filtered = filter_by_group_and_unit(df_time, sel_group, sel_unit)
 
-    # --- Update Sidebar Stats ---
-    sidebar_stats_placeholder = st.sidebar.empty()
-    if filtered.empty:
-        sidebar_stats_placeholder.warning("ไม่พบข้อมูล")
-        st.warning("ไม่พบข้อมูลตามตัวกรองที่เลือก")
+    # --- แสดงจำนวนข้อมูลที่กรองได้ ---
+    if not filtered.empty:
+        st.sidebar.markdown(f"✅ พบข้อมูล: **{len(filtered):,}** รายการ")
     else:
-        min_date_filt = filtered['Occurrence Date'].min()
-        max_date_filt = filtered['Occurrence Date'].max()
-        min_date_str_filt = min_date_filt.strftime('%d/%m/%Y') if pd.notna(min_date_filt) else "N/A"
-        max_date_str_filt = max_date_filt.strftime('%d/%m/%Y') if pd.notna(max_date_filt) else "N/A"
+        st.sidebar.warning("ไม่พบข้อมูลตามตัวกรอง")
 
-        total_month_filt = 0
-        if pd.notna(min_date_filt) and pd.notna(max_date_filt):
-            max_p_filt = max_date_filt.to_period('M')
-            min_p_filt = min_date_filt.to_period('M')
-            total_month_filt = max(
-                1,
-                (max_p_filt.year - min_p_filt.year) * 12 + (max_p_filt.month - min_p_filt.month) + 1
-            )
-
-        sidebar_stats_placeholder.markdown(f"**ช่วงข้อมูล (กรอง):** {min_date_str_filt} ถึง {max_date_str_filt}")
-        sidebar_stats_placeholder.markdown(f"**จำนวนเดือน (กรอง):** {total_month_filt} เดือน")
-        sidebar_stats_placeholder.markdown(f"**อุบัติการณ์ (กรองแล้ว):** {filtered.shape[0]:,} รายการ")
-
-    # ตัวอย่างแสดงข้อมูล
-    st.subheader("ตัวอย่างข้อมูลที่โหลดแล้ว")
-    st.write(df_main.head())
-    
-    # !!! สำคัญ: ต้องส่งคืน filtered !!!
+    # !!! สำคัญที่สุด: ส่งคืน DataFrame ที่กรองแล้ว !!!
     return filtered
-
 
 def _rename_to_standard(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -848,30 +801,48 @@ def _rename_to_standard(df: pd.DataFrame) -> pd.DataFrame:
                     break
     return df
 
-
-if __name__ == "__main__":
-    # !!! แก้ไข: รับค่า filtered จากฟังก์ชัน !!!
-    filtered = display_executive_dashboard()
-    
-    # ป้องกันกรณี filtered เป็น None
+# ==============================================================================
+# 8) CONTENT RENDERING (ฟังก์ชันสำหรับแสดงผลหน้าต่างๆ แยกออกมา)
+# ==============================================================================
+def render_dashboard_interface(filtered):
+    # ป้องกัน error กรณี filtered เป็น None
     if filtered is None:
         filtered = pd.DataFrame()
 
+    # --- Sidebar Menu ---
     app_functions_list = ["RCA Helpdesk (AI Assistant)"]
-    st.sidebar.markdown("---");
+    st.sidebar.markdown("---")
     st.sidebar.markdown("เลือกส่วนที่ต้องการแสดงผล:")
 
-    dashboard_pages_list = ["แดชบอร์ดสรุปภาพรวม", "Incidents Analysis","Risk Matrix (Interactive)","Risk level", "Risk Register Assistant", "Heatmap รายเดือน", "Sentinel Events & Top 10", "สรุปอุบัติการณ์ตาม Safety Goals", "Persistence Risk Index", "Early Warning: อุบัติการณ์ที่มีแนวโน้มสูงขึ้น", "บทสรุปสำหรับผู้บริหาร"]
-    if 'selected_analysis' not in st.session_state: st.session_state.selected_analysis = "แดชบอร์ดสรุปภาพรวม"
+    dashboard_pages_list = [
+        "แดชบอร์ดสรุปภาพรวม", 
+        "Incidents Analysis",
+        "Risk Matrix (Interactive)",
+        "Risk level", 
+        "Risk Register Assistant", 
+        "Heatmap รายเดือน", 
+        "Sentinel Events & Top 10", 
+        "สรุปอุบัติการณ์ตาม Safety Goals", 
+        "Persistence Risk Index", 
+        "Early Warning: อุบัติการณ์ที่มีแนวโน้มสูงขึ้น", 
+        "บทสรุปสำหรับผู้บริหาร"
+    ]
+    
+    if 'selected_analysis' not in st.session_state: 
+        st.session_state.selected_analysis = "แดชบอร์ดสรุปภาพรวม"
+        
     st.markdown("---")
+    
+    # สร้างปุ่มเมนู
     for option in app_functions_list:
         if st.sidebar.button(option, key=f"btn_{option}", type="primary" if st.session_state.selected_analysis == option else "secondary", use_container_width=True):
-            st.session_state.selected_analysis = option; st.rerun()
+            st.session_state.selected_analysis = option
+            st.rerun()
 
     for option in dashboard_pages_list:
         if st.sidebar.button(option, key=f"btn_{option}", type="primary" if st.session_state.selected_analysis == option else "secondary", use_container_width=True):
-            st.session_state.selected_analysis = option; st.rerun()
-
+            st.session_state.selected_analysis = option
+            st.rerun()
     # --- Sidebar Footer ---
     st.sidebar.markdown("---")
     st.sidebar.markdown(f"""
@@ -2285,16 +2256,23 @@ elif selected_page == "บทสรุปสำหรับผู้บริห
         components.html(preview_html, height=1200, scrolling=True)
 
 # ==============================================================================
-# MAIN FUNCTION (ส่วนปิดท้ายไฟล์ที่ต้องมี)
+# MAIN FUNCTION (รวมการทำงานทั้งหมดไว้ที่นี่ที่เดียว)
 # ==============================================================================
 def main():
     # รับ query params เพื่อรองรับการลิงก์ไปหน้า admin (ถ้ามี)
-    page = st.query_params.get("page", "executive")
+    try:
+        page = st.query_params.get("page", "executive")
+    except:
+        page = "executive"
     
     if page == "admin":
         display_admin_page()
     else:
-        display_executive_dashboard()
+        # 1. โหลดข้อมูลและแสดงตัวกรอง (เรียกแค่ครั้งเดียว!)
+        filtered_df = display_executive_dashboard()
+        
+        # 2. แสดงผลเนื้อหาตามเมนู (ส่ง Dataframe ที่โหลดแล้วเข้าไป)
+        render_dashboard_interface(filtered_df)
 
 if __name__ == "__main__":
     main()
