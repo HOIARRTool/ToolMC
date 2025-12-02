@@ -1555,154 +1555,150 @@ def create_goal_summary_table(
     is_org_safety_table=False,
 ):
     """
-    df          : DataFrame หลัก (filtered หรือ df_main หลังกรอง)
-    goal_name   : ชื่อหมวดในคอลัมน์ 'หมวด' / 'หมวด_clean' ของ Code2024.xlsx
-    code_mapping: DataFrame จาก Code2024.xlsx (ผ่าน load_code2024_mapping)
+    สร้างตารางสรุปอุบัติการณ์ตาม Safety Goals
+
+    df           : DataFrame หลัก (filtered)
+    goal_name    : ชื่อหมวดใน Code2024.xlsx เช่น "Patient Safety Goals หรือ Common Clinical Risk Incident"
+    code_mapping : DataFrame จาก Code2024.xlsx
+    is_org_safety_table : ถ้า True ใช้ระดับ 1–5 (Impact Level) และคิดรวม 3–5
+                          ถ้า False ใช้ระดับ A–I (Impact / Letter) และคิดรวม E–I
     """
 
-    # ========= ระบุชื่อคอลัมน์ให้ตรงกับ Code2024 / df =========
-    MAP_GOAL_COL     = "หมวด"       # คอลัมน์ใน Code2024 ที่บอกว่าอยู่ Goal ไหน
-    MAP_CODE_COL     = "รหัส"       # คอลัมน์รหัสเหตุการณ์ใน Code2024
-    MAP_INCIDENT_COL = "ประเภท"     # ชื่อ Incident Type ที่จะเอาไปแสดงในตาราง
-
-    INCIDENT_CODE_COL = "รหัส"         # คอลัมน์รหัสใน df ที่ใช้เชื่อมกับ Code2024
-    SEVERITY_COL      = "ระดับความรุนแรง"   # ใน df (ต้นฉบับจากไฟล์รายงาน)
-    # =======================================================
-
-    # --- เช็คของจำเป็นก่อน ---
-    if df is None or df.empty:
-        return None
-    if code_mapping is None or code_mapping.empty:
-        return None
-    if INCIDENT_CODE_COL not in df.columns or SEVERITY_COL not in df.columns:
-        return None
-    for c in [MAP_CODE_COL, MAP_INCIDENT_COL]:
-        if c not in code_mapping.columns:
-            return None
-    if MAP_GOAL_COL not in code_mapping.columns and "หมวด_clean" not in code_mapping.columns:
+    # ---------- Helper เล็ก ๆ สำหรับเลือกชื่อคอลัมน์ ----------
+    def pick_col(_df, candidates):
+        for c in candidates:
+            if c in _df.columns:
+                return c
         return None
 
-    # ทำสำเนา + ทำความสะอาด
-    df = df.copy()
-    code_mapping = code_mapping.copy()
+    # ---------- ตรวจความถูกต้องของ mapping ----------
+    if not isinstance(code_mapping, pd.DataFrame) or code_mapping.empty:
+        st.warning("⚠️ Code2024.xlsx ว่างหรือโหลดไม่สำเร็จ")
+        return None
 
-    df[INCIDENT_CODE_COL] = (
-        df[INCIDENT_CODE_COL].astype(str).str.replace("\xa0", " ").str.strip()
-    )
-    df[SEVERITY_COL] = (
-        df[SEVERITY_COL].astype(str).str.strip().str.upper()
-    )
-
-    code_mapping[MAP_CODE_COL] = (
-        code_mapping[MAP_CODE_COL].astype(str).str.replace("\xa0", " ").str.strip()
-    )
-    code_mapping[MAP_INCIDENT_COL] = (
-        code_mapping[MAP_INCIDENT_COL].astype(str).str.replace("\xa0", " ").str.strip()
+    # คอลัมน์ใน Code2024.xlsx
+    goal_col = pick_col(code_mapping, ["หมวด", "Goal", "SafetyGoal", "Safety Goal"])
+    code_col = pick_col(code_mapping, ["รหัส", "Code", "Incident Code", "Incident_Code"])
+    incident_col = pick_col(
+        code_mapping,
+        ["ประเภท", "Incident Type", "Incident_Type", "IncidentType",
+         "Incident Name", "Incident_Name", "Incident", "เหตุการณ์"]
     )
 
-    # 1) เลือกเฉพาะ mapping ของ Goal ที่ต้องการ (ยืดหยุ่นเรื่อง P:, S: ฯลฯ)
-    goal_name_norm = str(goal_name).strip()
+    missing_cols = []
+    if goal_col is None:
+        missing_cols.append("หมวด/Goal")
+    if code_col is None:
+        missing_cols.append("รหัส (Code)")
+    if incident_col is None:
+        missing_cols.append("ประเภท (Incident Type)")
 
-    if "หมวด_clean" in code_mapping.columns:
-        goal_series = code_mapping["หมวด_clean"].astype(str)
-    else:
-        goal_series = code_mapping[MAP_GOAL_COL].astype(str).str.strip()
+    if missing_cols:
+        st.warning("⚠️ Code2024.xlsx ไม่มีคอลัมน์: " + ", ".join(missing_cols))
+        return None
 
-    # ลองเทียบแบบเท่ากันก่อน
-    mask = goal_series == goal_name_norm
-    # ถ้าไม่เจอ ลอง contains เผื่อมี prefix "P:" "S:" ฯลฯ
-    if not mask.any():
-        mask = goal_series.str.contains(re.escape(goal_name_norm), na=False)
-
-    mapping_goal = code_mapping.loc[mask, [MAP_CODE_COL, MAP_INCIDENT_COL]].dropna()
+    # ---------- เลือกเฉพาะแถวของ Goal ที่ต้องการ ----------
+    mapping_goal = code_mapping[code_mapping[goal_col] == goal_name].copy()
     if mapping_goal.empty:
+        # หมวดนี้ไม่มี mapping ก็แค่ไม่แสดงอะไร
         return None
 
     # ลำดับ Incident Type ตามไฟล์ Code2024
     incident_order = (
-        mapping_goal[MAP_INCIDENT_COL]
+        mapping_goal[incident_col]
         .dropna()
         .drop_duplicates()
         .tolist()
     )
 
-    # 2) merge df หลักกับ mapping ตาม "รหัส"
-    df_merged = df.merge(
-        mapping_goal,
-        left_on=INCIDENT_CODE_COL,
-        right_on=MAP_CODE_COL,
-        how="inner",
-    ).dropna(subset=[MAP_INCIDENT_COL])
+    # ---------- เตรียม df หลัก ----------
+    if "รหัส" not in df.columns:
+        st.warning("⚠️ ข้อมูลอุบัติการณ์ไม่มีคอลัมน์ 'รหัส' ไม่สามารถสร้างตาราง Safety Goals ได้")
+        return None
 
+    # merge ตามรหัส
+    df_merged = df.merge(
+        mapping_goal[[code_col, incident_col]],
+        left_on="รหัส",
+        right_on=code_col,
+        how="inner",
+    )
+
+    if incident_col not in df_merged.columns:
+        return None
+
+    df_merged = df_merged.dropna(subset=[incident_col])
     if df_merged.empty:
         return None
 
-    # 3) pivot นับจำนวนเหตุการณ์ตาม Incident Type x ระดับความรุนแรง
+    # ---------- เลือกคอลัมน์ความรุนแรง ----------
+    if is_org_safety_table:
+        # ใช้ระดับ 1–5 (Impact Level)
+        severity_col = pick_col(df_merged, ["Impact Level", "ระดับความรุนแรง 1-5", "SeverityLevel"])
+        default_levels = ["1", "2", "3", "4", "5"]
+    else:
+        # ใช้ตัวอักษร A–I (Impact)
+        severity_col = pick_col(df_merged, ["Impact", "ระดับความรุนแรง", "Severity"])
+        default_levels = list("ABCDEFGHI")
+
+    if severity_col is None:
+        st.warning("⚠️ ไม่พบคอลัมน์ระดับความรุนแรงในข้อมูลอุบัติการณ์")
+        return None
+
+    # ---------- pivot: Incident Type x Severity ----------
     grouped = (
         df_merged
-        .groupby([MAP_INCIDENT_COL, SEVERITY_COL], observed=True)
+        .groupby([incident_col, severity_col])
         .size()
-        .unstack(SEVERITY_COL)
+        .unstack(severity_col)
         .fillna(0)
     )
 
+    # ให้แน่ใจว่ามีทุกระดับที่ต้องการ
+    for lv in default_levels:
+        if lv not in grouped.columns:
+            grouped[lv] = 0
+
+    # เรียงคอลัมน์ตาม default_levels
+    grouped = grouped[default_levels]
+
     if is_org_safety_table:
-        # --- Organization Safety : ใช้ระดับ 1–5 และนับ 3–5 เป็นรุนแรง ---
-        sev_levels = ["1", "2", "3", "4", "5"]
-        for lv in sev_levels:
-            if lv not in grouped.columns:
-                grouped[lv] = 0
-        grouped = grouped[sev_levels]
-
+        # Organization Safety: รวม 3–5 และคิดร้อยละ
         grouped["รวม 3-5"] = grouped[["3", "4", "5"]].sum(axis=1)
-        grouped["รวม"] = grouped[sev_levels].sum(axis=1)
+        grouped["รวมทั้งหมด"] = grouped[default_levels].sum(axis=1)
         grouped["ร้อยละ 3-5"] = (
-            (grouped["รวม 3-5"] / grouped["รวม"])
+            (grouped["รวม 3-5"] / grouped["รวมทั้งหมด"])
             .replace([np.inf, -np.inf], np.nan)
             .fillna(0)
             * 100
         ).round(2)
-
-        result = grouped
-
+        result = grouped.copy()
     else:
-        # --- PSG ทั่วไป : สนใจเฉพาะ E–I (E-Up) แต่ตัวหารใช้ A–I ทั้งหมด ---
-        all_levels = list("ABCDEFGHI")
-        for lv in all_levels:
-            if lv not in grouped.columns:
-                grouped[lv] = 0
-
-        all_counts = grouped[all_levels].copy()
-
-        e_up_levels = ["E", "F", "G", "H", "I"]
-        grouped_e = grouped[e_up_levels].copy()
-
-        grouped_e["รวม E-Up"] = grouped_e[e_up_levels].sum(axis=1)
-        grouped_e["รวม(ระดับ A-I)"] = all_counts.sum(axis=1)
-        grouped_e["ร้อยละ E-Up"] = (
-            (grouped_e["รวม E-Up"] / grouped_e["รวม(ระดับ A-I)"])
+        # PSG ทั่วไป: รวม E–I และคิดร้อยละจาก A–I
+        grouped["รวม E-Up"] = grouped[["E", "F", "G", "H", "I"]].sum(axis=1)
+        grouped["รวม A-I"] = grouped[default_levels].sum(axis=1)
+        grouped["ร้อยละ E-Up"] = (
+            (grouped["รวม E-Up"] / grouped["รวม A-I"])
             .replace([np.inf, -np.inf], np.nan)
             .fillna(0)
             * 100
         ).round(2)
+        result = grouped.copy()
 
-        result = grouped_e
-
-    # 4) เรียง Incident Type ตามลำดับใน Code2024
+    # ---------- เรียง Incident Type ตามลำดับใน Code2024 ----------
     idx_in_result = result.index.tolist()
     ordered_idx = [x for x in incident_order if x in idx_in_result]
     remaining_idx = [x for x in idx_in_result if x not in ordered_idx]
     final_order = ordered_idx + remaining_idx
-
     result = result.reindex(final_order)
 
-    # 5) เพิ่มแถว "รวม" ด้านล่าง
+    # ---------- เพิ่มแถว "รวม" ด้านล่าง ----------
     total_row = pd.DataFrame(result.sum(numeric_only=True)).T
     total_row.index = ["รวม"]
     result = pd.concat([result, total_row], axis=0)
 
-    # 6) ย้าย index มาเป็นคอลัมน์ Incident Type เพื่อให้แสดงสวยใน Streamlit
-    result = result.reset_index().rename(columns={MAP_INCIDENT_COL: "Incident Type"})
+    # ---------- ย้าย index มาเป็นคอลัมน์ Incident Type ----------
+    result = result.reset_index().rename(columns={incident_col: "Incident Type"})
 
     return result
 
