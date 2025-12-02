@@ -2180,23 +2180,19 @@ elif selected_page == "สรุปอุบัติการณ์ตาม Sa
 
             for display_name, goal_name, is_org_safety in safety_goal_order:
                 st.subheader(display_name)
-                summary_table = create_goal_summary_table(
-                    filtered,
-                    goal_name=goal_name,
-                    code_mapping=code_mapping,
-                    is_org_safety_table=is_org_safety,
-                )
-                if summary_table is not None and not summary_table.empty:
-                    st.dataframe(summary_table, use_container_width=True)
-                else:
-                    st.info(f"ไม่พบข้อมูลสำหรับ '{display_name}' ในช่วงเวลาที่เลือก")
-
-                if summary_table is not None and not summary_table.empty:
-                    st.dataframe(summary_table, use_container_width=True, hide_index=True)
-                else:
-                    st.info(f"ไม่พบข้อมูลสำหรับ {display_name}")
-            except Exception as e:
-                st.error(f"เกิดข้อผิดพลาดในการสร้างตาราง {display_name}: {e}")
+                try:
+                    summary_table = create_goal_summary_table(
+                        filtered,
+                        goal_name=goal_name,
+                        code_mapping=code_mapping,
+                        is_org_safety_table=is_org_safety,
+                    )
+                    if summary_table is not None and not summary_table.empty:
+                        st.dataframe(summary_table, use_container_width=True)
+                    else:
+                        st.info(f"ไม่พบข้อมูลสำหรับ '{display_name}' ในช่วงเวลาที่เลือก")
+                except Exception as e:
+                    st.error(f"เกิดข้อผิดพลาดในการสร้างตาราง {display_name}: {e}")
 
         # จุดสำหรับเพิ่มกราฟ/ sunburst ภายหลัง (ปัจจุบันตัดออกเพื่อความเสถียร)
 
