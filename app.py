@@ -1217,40 +1217,34 @@ def render_incidents_analysis(df: pd.DataFrame):
                 "ภายใต้แต่ละเป้าหมายความปลอดภัย โดยอ้างอิง Mapping จากไฟล์ Code2024.xlsx"
             )
 
-            # 1) โหลด mapping จาก Code2024.xlsx
-            try:
-                code_mapping = pd.read_excel("Code2024.xlsx", sheet_name="Sheet1")
-            except Exception as e:
-                st.error(f"ไม่สามารถโหลดไฟล์ 'Code2024.xlsx' ได้ : {e}")
-                st.stop()
+            code_mapping = load_code2024_mapping()
+            if code_mapping.empty:
+                st.warning("ไม่พบข้อมูล mapping ใน 'Code2024.xlsx' หรือโครงสร้างไฟล์ไม่ตรงกับที่ระบบคาดไว้")
+            else:
+                safety_goal_order = [
+                    ("Patient Safety Goals หรือ Common Clinical Risk Incident", False),
+                    ("Specific Clinical Risk Incident", False),
+                    ("Personnel Safety Goals", False),
+                    ("Organization Safety Goals", True),
+                ]
 
-            # 2) ลำดับหมวดตามไฟล์ Code2024 (ต้องตรงกับคอลัมน์ 'หมวด')
-            goal_order = [
-                "Patient Safety Goals หรือ Common Clinical Risk Incident",
-                "Specific Clinical Risk Incident",
-                "Personnel Safety Goals",
-                "Organization Safety Goals",
-            ]
+                for goal_name, is_org_safety in safety_goal_order:
+                    st.markdown(f"##### {goal_name}")
 
-            # 3) วนทีละหมวด แล้วเรียก create_goal_summary_table ให้ถูก 3 argument
-            for goal_name in goal_order:
-                st.markdown(f"##### {goal_name}")
+                    summary_table = create_goal_summary_table(
+                        df,
+                        goal_name=goal_name,
+                        code_mapping=code_mapping,
+                        is_org_safety_table=is_org_safety,
+                    )
 
-                is_org_safety = (goal_name == "Organization Safety Goals")
+                    if summary_table is not None and not summary_table.empty:
+                        st.dataframe(summary_table, use_container_width=True)
+                    else:
+                        st.info(f"ไม่พบข้อมูลสำหรับ '{goal_name}' ในช่วงเวลาที่เลือก")
 
-                summary_table = create_goal_summary_table(
-                    df,
-                    goal_name=goal_name,          # <-- arg ตัวที่ 2
-                    code_mapping=code_mapping,    # <-- arg ตัวที่ 3
-                    is_org_safety_table=is_org_safety,
-                )
+                    st.markdown("---")
 
-                if summary_table is not None and not summary_table.empty:
-                    st.dataframe(summary_table, use_container_width=True)
-                else:
-                    st.info(f"ไม่พบข้อมูลสำหรับ '{goal_name}' ในช่วงเวลาที่เลือก")
-
-                st.markdown("---")
 
 def render_risk_matrix_interactive(df: pd.DataFrame, key_prefix: str = "main_rmx"):
     st.subheader("Risk Matrix (Interactive)")
@@ -1497,6 +1491,60 @@ def create_summary_table_by_category(dataframe, category_column_name):
 
 
 # --- END: Helper Functions for Incident Analysis ---
+@st.cache_data
+def load_code2024_mapping(
+    filepath: str = "Code2024.xlsx",
+    sheet_name: str = "Sheet1"
+) -> pd.DataFrame:
+    """
+    อ่านไฟล์ Code2024.xlsx แล้ว normalize ชื่อคอลัมน์/ค่า
+    ให้ใช้คอลัมน์มาตรฐานคือ 'รหัส', 'หมวด', 'ประเภท'
+    """
+    if not Path(filepath).is_file():
+        st.warning(f"ไม่พบไฟล์ mapping '{filepath}'")
+        return pd.DataFrame()
+
+    try:
+        mapping = pd.read_excel(filepath, sheet_name=sheet_name)
+    except Exception as e:
+        st.error(f"อ่านไฟล์ '{filepath}' ไม่สำเร็จ: {e}")
+        return pd.DataFrame()
+
+    # ล้างชื่อคอลัมน์
+    mapping.columns = [str(c).replace("\ufeff", "").strip() for c in mapping.columns]
+
+    # เผื่อในไฟล์ใช้ชื่อคอลัมน์อื่น
+    rename_map = {}
+    if "หมวดหมู่" in mapping.columns and "หมวด" not in mapping.columns:
+        rename_map["หมวดหมู่"] = "หมวด"
+    if "รหัสเหตุการณ์" in mapping.columns and "รหัส" not in mapping.columns:
+        rename_map["รหัสเหตุการณ์"] = "รหัส"
+    if "Incident Type" in mapping.columns and "ประเภท" not in mapping.columns:
+        rename_map["Incident Type"] = "ประเภท"
+
+    if rename_map:
+        mapping = mapping.rename(columns=rename_map)
+
+    # ทำความสะอาดค่าที่ใช้ join
+    for col in ["รหัส", "หมวด", "ประเภท"]:
+        if col in mapping.columns:
+            mapping[col] = (
+                mapping[col]
+                .astype(str)
+                .str.replace("\xa0", " ")
+                .str.strip()
+            )
+
+    # เพิ่มคอลัมน์หมวดแบบ clean (ตัด prefix P:, S:, O:, G: ฯลฯ)
+    if "หมวด" in mapping.columns:
+        mapping["หมวด_clean"] = (
+            mapping["หมวด"]
+            .astype(str)
+            .str.strip()
+            .str.replace(r"^[PSOG]\s*[:\-]\s*", "", regex=True)
+        )
+
+    return mapping
 
 def create_goal_summary_table(
     df,
@@ -1507,22 +1555,66 @@ def create_goal_summary_table(
     is_org_safety_table=False,
 ):
     """
-    df         : DataFrame หลัก (filtered หรือ df_clean)
-    goal_name  : ชื่อหมวดในคอลัมน์ 'หมวด' ของ Code2024.xlsx
-    code_mapping : DataFrame จาก Code2024.xlsx (Sheet1)
+    df          : DataFrame หลัก (filtered หรือ df_main หลังกรอง)
+    goal_name   : ชื่อหมวดในคอลัมน์ 'หมวด' / 'หมวด_clean' ของ Code2024.xlsx
+    code_mapping: DataFrame จาก Code2024.xlsx (ผ่าน load_code2024_mapping)
     """
 
     # ========= ระบุชื่อคอลัมน์ให้ตรงกับ Code2024 / df =========
-    MAP_GOAL_COL     = "หมวด"     # คอลัมน์ใน Code2024 ที่บอกว่าอยู่ Goal ไหน
-    MAP_CODE_COL     = "รหัส"     # คอลัมน์รหัสเหตุการณ์ใน Code2024
-    MAP_INCIDENT_COL = "ประเภท"   # ชื่อ Incident Type ที่จะเอาไปแสดงในตาราง
+    MAP_GOAL_COL     = "หมวด"       # คอลัมน์ใน Code2024 ที่บอกว่าอยู่ Goal ไหน
+    MAP_CODE_COL     = "รหัส"       # คอลัมน์รหัสเหตุการณ์ใน Code2024
+    MAP_INCIDENT_COL = "ประเภท"     # ชื่อ Incident Type ที่จะเอาไปแสดงในตาราง
 
-    INCIDENT_CODE_COL = "รหัส"      # คอลัมน์รหัสใน df ที่ใช้เชื่อมกับ Code2024
-    SEVERITY_COL      = "ระดับความรุนแรง"
+    INCIDENT_CODE_COL = "รหัส"         # คอลัมน์รหัสใน df ที่ใช้เชื่อมกับ Code2024
+    SEVERITY_COL      = "ระดับความรุนแรง"   # ใน df (ต้นฉบับจากไฟล์รายงาน)
     # =======================================================
 
-    # 1) เลือกเฉพาะ mapping ของ Goal ที่ต้องการ
-    mapping_goal = code_mapping[code_mapping[MAP_GOAL_COL] == goal_name].copy()
+    # --- เช็คของจำเป็นก่อน ---
+    if df is None or df.empty:
+        return None
+    if code_mapping is None or code_mapping.empty:
+        return None
+    if INCIDENT_CODE_COL not in df.columns or SEVERITY_COL not in df.columns:
+        return None
+    for c in [MAP_CODE_COL, MAP_INCIDENT_COL]:
+        if c not in code_mapping.columns:
+            return None
+    if MAP_GOAL_COL not in code_mapping.columns and "หมวด_clean" not in code_mapping.columns:
+        return None
+
+    # ทำสำเนา + ทำความสะอาด
+    df = df.copy()
+    code_mapping = code_mapping.copy()
+
+    df[INCIDENT_CODE_COL] = (
+        df[INCIDENT_CODE_COL].astype(str).str.replace("\xa0", " ").str.strip()
+    )
+    df[SEVERITY_COL] = (
+        df[SEVERITY_COL].astype(str).str.strip().str.upper()
+    )
+
+    code_mapping[MAP_CODE_COL] = (
+        code_mapping[MAP_CODE_COL].astype(str).str.replace("\xa0", " ").str.strip()
+    )
+    code_mapping[MAP_INCIDENT_COL] = (
+        code_mapping[MAP_INCIDENT_COL].astype(str).str.replace("\xa0", " ").str.strip()
+    )
+
+    # 1) เลือกเฉพาะ mapping ของ Goal ที่ต้องการ (ยืดหยุ่นเรื่อง P:, S: ฯลฯ)
+    goal_name_norm = str(goal_name).strip()
+
+    if "หมวด_clean" in code_mapping.columns:
+        goal_series = code_mapping["หมวด_clean"].astype(str)
+    else:
+        goal_series = code_mapping[MAP_GOAL_COL].astype(str).str.strip()
+
+    # ลองเทียบแบบเท่ากันก่อน
+    mask = goal_series == goal_name_norm
+    # ถ้าไม่เจอ ลอง contains เผื่อมี prefix "P:" "S:" ฯลฯ
+    if not mask.any():
+        mask = goal_series.str.contains(re.escape(goal_name_norm), na=False)
+
+    mapping_goal = code_mapping.loc[mask, [MAP_CODE_COL, MAP_INCIDENT_COL]].dropna()
     if mapping_goal.empty:
         return None
 
@@ -1536,7 +1628,7 @@ def create_goal_summary_table(
 
     # 2) merge df หลักกับ mapping ตาม "รหัส"
     df_merged = df.merge(
-        mapping_goal[[MAP_CODE_COL, MAP_INCIDENT_COL]],
+        mapping_goal,
         left_on=INCIDENT_CODE_COL,
         right_on=MAP_CODE_COL,
         how="inner",
@@ -1548,22 +1640,22 @@ def create_goal_summary_table(
     # 3) pivot นับจำนวนเหตุการณ์ตาม Incident Type x ระดับความรุนแรง
     grouped = (
         df_merged
-        .groupby([MAP_INCIDENT_COL, SEVERITY_COL])
+        .groupby([MAP_INCIDENT_COL, SEVERITY_COL], observed=True)
         .size()
         .unstack(SEVERITY_COL)
         .fillna(0)
     )
 
     if is_org_safety_table:
-        # Organization Safety : ใช้ระดับ 1–5 และนับ 3–5 เป็นรุนแรง
-        severity_levels = ["1", "2", "3", "4", "5"]
-        for lv in severity_levels:
+        # --- Organization Safety : ใช้ระดับ 1–5 และนับ 3–5 เป็นรุนแรง ---
+        sev_levels = ["1", "2", "3", "4", "5"]
+        for lv in sev_levels:
             if lv not in grouped.columns:
                 grouped[lv] = 0
-        grouped = grouped[severity_levels]
+        grouped = grouped[sev_levels]
 
         grouped["รวม 3-5"] = grouped[["3", "4", "5"]].sum(axis=1)
-        grouped["รวม"] = grouped[severity_levels].sum(axis=1)
+        grouped["รวม"] = grouped[sev_levels].sum(axis=1)
         grouped["ร้อยละ 3-5"] = (
             (grouped["รวม 3-5"] / grouped["รวม"])
             .replace([np.inf, -np.inf], np.nan)
@@ -1571,25 +1663,30 @@ def create_goal_summary_table(
             * 100
         ).round(2)
 
-        result = grouped.copy()
+        result = grouped
+
     else:
-        # PSG ทั่วไป : สนใจเฉพาะ E–I และนับเป็น E-Up
-        severity_levels = ["E", "F", "G", "H", "I"]
-        for lv in severity_levels:
+        # --- PSG ทั่วไป : สนใจเฉพาะ E–I (E-Up) แต่ตัวหารใช้ A–I ทั้งหมด ---
+        all_levels = list("ABCDEFGHI")
+        for lv in all_levels:
             if lv not in grouped.columns:
                 grouped[lv] = 0
-        grouped = grouped[severity_levels]
 
-        grouped["รวม E-Up"] = grouped[["E", "F", "G", "H", "I"]].sum(axis=1)
-        grouped["รวม(ระดับ A-I)"] = grouped[severity_levels].sum(axis=1)
-        grouped["ร้อยละ E-Up"] = (
-            (grouped["รวม E-Up"] / grouped["รวม(ระดับ A-I)"])
+        all_counts = grouped[all_levels].copy()
+
+        e_up_levels = ["E", "F", "G", "H", "I"]
+        grouped_e = grouped[e_up_levels].copy()
+
+        grouped_e["รวม E-Up"] = grouped_e[e_up_levels].sum(axis=1)
+        grouped_e["รวม(ระดับ A-I)"] = all_counts.sum(axis=1)
+        grouped_e["ร้อยละ E-Up"] = (
+            (grouped_e["รวม E-Up"] / grouped_e["รวม(ระดับ A-I)"])
             .replace([np.inf, -np.inf], np.nan)
             .fillna(0)
             * 100
         ).round(2)
 
-        result = grouped.copy()
+        result = grouped_e
 
     # 4) เรียง Incident Type ตามลำดับใน Code2024
     idx_in_result = result.index.tolist()
@@ -1608,6 +1705,7 @@ def create_goal_summary_table(
     result = result.reset_index().rename(columns={MAP_INCIDENT_COL: "Incident Type"})
 
     return result
+
 
 @st.cache_data
 def calculate_persistence_risk_score(_df: pd.DataFrame, total_months: int):
@@ -2061,14 +2159,38 @@ elif selected_page == "สรุปอุบัติการณ์ตาม Sa
     if filtered.empty:
         st.info("ไม่มีข้อมูลตามตัวกรอง")
     else:
-        # --- Part 1: Summary Tables ---
-        for display_name, cat_name in goal_definitions.items():
-            st.subheader(display_name)
-            try:
+        code_mapping = load_code2024_mapping()
+        if code_mapping.empty:
+            st.warning("ไม่พบไฟล์ 'Code2024.xlsx' หรือไม่มีคอลัมน์ 'รหัส' / 'หมวด' / 'ประเภท'")
+        else:
+            safety_goal_order = [
+                ("Patient Safety / Common Clinical Risk Incident",
+                 "Patient Safety Goals หรือ Common Clinical Risk Incident",
+                 False),
+                ("Specific Clinical Risk Incident",
+                 "Specific Clinical Risk Incident",
+                 False),
+                ("Personnel Safety Goals",
+                 "Personnel Safety Goals",
+                 False),
+                ("Organization Safety Goals",
+                 "Organization Safety Goals",
+                 True),
+            ]
+
+            for display_name, goal_name, is_org_safety in safety_goal_order:
+                st.subheader(display_name)
                 summary_table = create_goal_summary_table(
-                    data_df_goal=filtered,
-                    goal_category_name_param=cat_name
+                    filtered,
+                    goal_name=goal_name,
+                    code_mapping=code_mapping,
+                    is_org_safety_table=is_org_safety,
                 )
+                if summary_table is not None and not summary_table.empty:
+                    st.dataframe(summary_table, use_container_width=True)
+                else:
+                    st.info(f"ไม่พบข้อมูลสำหรับ '{display_name}' ในช่วงเวลาที่เลือก")
+
                 if summary_table is not None and not summary_table.empty:
                     st.dataframe(summary_table, use_container_width=True, hide_index=True)
                 else:
