@@ -1216,37 +1216,41 @@ def render_incidents_analysis(df: pd.DataFrame):
                 "ตารางแสดงสถิติความรุนแรงแยกตามประเภทอุบัติการณ์ (Incident Type) "
                 "ภายใต้แต่ละเป้าหมายความปลอดภัย โดยอ้างอิง Mapping จากไฟล์ Code2024.xlsx"
             )
-        
-            # 1) โหลด mapping ก่อน (ตรงนี้แหละที่เอา code_mapping ไปวาง)
+
+            # 1) โหลด mapping จาก Code2024.xlsx
             try:
                 code_mapping = pd.read_excel("Code2024.xlsx", sheet_name="Sheet1")
             except Exception as e:
                 st.error(f"ไม่สามารถโหลดไฟล์ 'Code2024.xlsx' ได้ : {e}")
                 st.stop()
-        
-            # 2) สร้างตารางสรุปทั้ง 4 หมวด โดยส่ง df (ที่ผ่านการกรอง/clean แล้ว) + mapping เข้าไป
-            goal_tables = create_goal_summary_table(df, code_mapping)
-        
-            # 3) กำหนดลำดับการแสดงผล 4 หมวด ตามชื่อใน Code2024
+
+            # 2) ลำดับหมวดตามไฟล์ Code2024 (ต้องตรงกับคอลัมน์ 'หมวด')
             goal_order = [
                 "Patient Safety Goals หรือ Common Clinical Risk Incident",
                 "Specific Clinical Risk Incident",
                 "Personnel Safety Goals",
                 "Organization Safety Goals",
             ]
-        
-            for display_name in goal_order:
-                st.markdown(f"##### {display_name}")
-        
-                summary_table = goal_tables.get(display_name)
-        
+
+            # 3) วนทีละหมวด แล้วเรียก create_goal_summary_table ให้ถูก 3 argument
+            for goal_name in goal_order:
+                st.markdown(f"##### {goal_name}")
+
+                is_org_safety = (goal_name == "Organization Safety Goals")
+
+                summary_table = create_goal_summary_table(
+                    df,
+                    goal_name=goal_name,          # <-- arg ตัวที่ 2
+                    code_mapping=code_mapping,    # <-- arg ตัวที่ 3
+                    is_org_safety_table=is_org_safety,
+                )
+
                 if summary_table is not None and not summary_table.empty:
                     st.dataframe(summary_table, use_container_width=True)
                 else:
-                    st.info(f"ไม่พบข้อมูลสำหรับ '{display_name}' ในช่วงเวลาที่เลือก")
-        
-                st.markdown("---")
+                    st.info(f"ไม่พบข้อมูลสำหรับ '{goal_name}' ในช่วงเวลาที่เลือก")
 
+                st.markdown("---")
 
 def render_risk_matrix_interactive(df: pd.DataFrame, key_prefix: str = "main_rmx"):
     st.subheader("Risk Matrix (Interactive)")
@@ -1503,31 +1507,26 @@ def create_goal_summary_table(
     is_org_safety_table=False,
 ):
     """
-    df            : df_clean ที่ผ่านการ clean แล้ว
-    goal_name     : key ของหมวดใหญ่ (เช่น 'Patient Safety Goals' ฯลฯ ตามที่ใช้ใน mapping)
-    code_mapping  : DataFrame จากไฟล์ Code2024.xlsx (Sheet1)
+    df         : DataFrame หลัก (filtered หรือ df_clean)
+    goal_name  : ชื่อหมวดในคอลัมน์ 'หมวด' ของ Code2024.xlsx
+    code_mapping : DataFrame จาก Code2024.xlsx (Sheet1)
     """
 
-    # ========= ปรับชื่อคอลัมน์ให้ตรงกับ Code2024 / df ของคุณ =========
-    MAP_GOAL_COL      = "หมวด"           # คอลัมน์ใน Code2024 ที่บอกว่าอยู่ Goal ไหน
-    MAP_CODE_COL      = "รหัส"           # คอลัมน์รหัสเหตุการณ์ใน Code2024
-    MAP_INCIDENT_COL  = "ประเภท"  # ชื่อ Incident Type ที่จะเอาไปแสดงในตาราง
+    # ========= ระบุชื่อคอลัมน์ให้ตรงกับ Code2024 / df =========
+    MAP_GOAL_COL     = "หมวด"     # คอลัมน์ใน Code2024 ที่บอกว่าอยู่ Goal ไหน
+    MAP_CODE_COL     = "รหัส"     # คอลัมน์รหัสเหตุการณ์ใน Code2024
+    MAP_INCIDENT_COL = "ประเภท"   # ชื่อ Incident Type ที่จะเอาไปแสดงในตาราง
 
-    INCIDENT_CODE_COL = "รหัส"           # คอลัมน์รหัสใน df ที่ใช้เชื่อมกับ Code2024
+    INCIDENT_CODE_COL = "รหัส"      # คอลัมน์รหัสใน df ที่ใช้เชื่อมกับ Code2024
     SEVERITY_COL      = "ระดับความรุนแรง"
-    # ===============================================================
+    # =======================================================
 
-    if e_up_non_numeric_levels_param is None:
-        e_up_non_numeric_levels_param = []
-    if e_up_numeric_levels_param is None:
-        e_up_numeric_levels_param = []
-
-    # ---- เลือกเฉพาะ mapping ของ Goal ที่ต้องการ และเก็บลำดับ Incident Type ต้นฉบับ ----
+    # 1) เลือกเฉพาะ mapping ของ Goal ที่ต้องการ
     mapping_goal = code_mapping[code_mapping[MAP_GOAL_COL] == goal_name].copy()
     if mapping_goal.empty:
         return None
 
-    # ลำดับ Incident Type ตามไฟล์ Code2024 (ใช้ไว้จัดเรียงตอนท้าย)
+    # ลำดับ Incident Type ตามไฟล์ Code2024
     incident_order = (
         mapping_goal[MAP_INCIDENT_COL]
         .dropna()
@@ -1535,22 +1534,18 @@ def create_goal_summary_table(
         .tolist()
     )
 
-    # ---- เชื่อม df กับ mapping เพื่อนำ Incident Type มาใช้ ----
+    # 2) merge df หลักกับ mapping ตาม "รหัส"
     df_merged = df.merge(
         mapping_goal[[MAP_CODE_COL, MAP_INCIDENT_COL]],
         left_on=INCIDENT_CODE_COL,
         right_on=MAP_CODE_COL,
         how="inner",
-    )
-
-    # เผื่อมี NaN Incident Type ตัดออกก่อน
-    df_merged = df_merged.dropna(subset=[MAP_INCIDENT_COL])
+    ).dropna(subset=[MAP_INCIDENT_COL])
 
     if df_merged.empty:
         return None
 
-    # ---- ทำ pivot นับจำนวนเหตุการณ์ตาม Incident Type x ระดับความรุนแรง ----
-    # นับเหตุการณ์
+    # 3) pivot นับจำนวนเหตุการณ์ตาม Incident Type x ระดับความรุนแรง
     grouped = (
         df_merged
         .groupby([MAP_INCIDENT_COL, SEVERITY_COL])
@@ -1559,39 +1554,44 @@ def create_goal_summary_table(
         .fillna(0)
     )
 
-    # ให้แน่ใจว่ามีคอลัมน์ severity ครบตามที่ต้องการ
     if is_org_safety_table:
+        # Organization Safety : ใช้ระดับ 1–5 และนับ 3–5 เป็นรุนแรง
         severity_levels = ["1", "2", "3", "4", "5"]
-    else:
-        severity_levels = ["E", "F", "G", "H", "I"]
+        for lv in severity_levels:
+            if lv not in grouped.columns:
+                grouped[lv] = 0
+        grouped = grouped[severity_levels]
 
-    for lv in severity_levels:
-        if lv not in grouped.columns:
-            grouped[lv] = 0
-
-    grouped = grouped[severity_levels]  # จัดคอลัมน์ให้อยู่ตามลำดับที่ต้องการ
-
-    # ---- คำนวณรวม E-up / รวมทั้งหมด / ร้อยละ ----
-    if is_org_safety_table:
-        # Org Safety : นับ 3–5 เป็นรุนแรง (E-up)
         grouped["รวม 3-5"] = grouped[["3", "4", "5"]].sum(axis=1)
         grouped["รวม"] = grouped[severity_levels].sum(axis=1)
         grouped["ร้อยละ 3-5"] = (
-            (grouped["รวม 3-5"] / grouped["รวม"]) * 100
+            (grouped["รวม 3-5"] / grouped["รวม"])
+            .replace([np.inf, -np.inf], np.nan)
+            .fillna(0)
+            * 100
         ).round(2)
+
         result = grouped.copy()
     else:
-        # PSG ทั่วไป : นับ E–I เป็นรุนแรง
+        # PSG ทั่วไป : สนใจเฉพาะ E–I และนับเป็น E-Up
+        severity_levels = ["E", "F", "G", "H", "I"]
+        for lv in severity_levels:
+            if lv not in grouped.columns:
+                grouped[lv] = 0
+        grouped = grouped[severity_levels]
+
         grouped["รวม E-Up"] = grouped[["E", "F", "G", "H", "I"]].sum(axis=1)
         grouped["รวม(ระดับ A-I)"] = grouped[severity_levels].sum(axis=1)
         grouped["ร้อยละ E-Up"] = (
-            (grouped["รวม E-Up"] / grouped["รวม(ระดับ A-I)"]) * 100
+            (grouped["รวม E-Up"] / grouped["รวม(ระดับ A-I)"])
+            .replace([np.inf, -np.inf], np.nan)
+            .fillna(0)
+            * 100
         ).round(2)
+
         result = grouped.copy()
 
-    # ---- จัดเรียง Incident Type ตามลำดับใน Code2024.xlsx ----
-    # ถ้า Incident Type ใน mapping กับใน result ไม่ตรงกันทั้งหมด
-    # เราจะเรียงเฉพาะที่เจอก่อน ที่เหลือให้ตามลำดับเดิมต่อท้าย
+    # 4) เรียง Incident Type ตามลำดับใน Code2024
     idx_in_result = result.index.tolist()
     ordered_idx = [x for x in incident_order if x in idx_in_result]
     remaining_idx = [x for x in idx_in_result if x not in ordered_idx]
@@ -1599,17 +1599,15 @@ def create_goal_summary_table(
 
     result = result.reindex(final_order)
 
-    # ---- เพิ่มแถวสรุปรวมด้านล่างสุด ----
+    # 5) เพิ่มแถว "รวม" ด้านล่าง
     total_row = pd.DataFrame(result.sum(numeric_only=True)).T
     total_row.index = ["รวม"]
-
     result = pd.concat([result, total_row], axis=0)
 
-    # แปลง index กลับเป็นคอลัมน์ "Incident Type" เพื่อให้ st.dataframe แสดงสวย ๆ
+    # 6) ย้าย index มาเป็นคอลัมน์ Incident Type เพื่อให้แสดงสวยใน Streamlit
     result = result.reset_index().rename(columns={MAP_INCIDENT_COL: "Incident Type"})
 
     return result
-
 
 @st.cache_data
 def calculate_persistence_risk_score(_df: pd.DataFrame, total_months: int):
